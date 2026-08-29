@@ -38,7 +38,7 @@ _claude_usage_rows() {
   cswap list --json 2>/dev/null | jq -r '
     # cswap reports .pct as quota *remaining* (it picks switch targets by
     # remaining headroom); invert it so the menu shows what you have *used*.
-    def pct($w): if $w == null then "--" else "\((100 - $w.pct) | floor)%" end;
+    def pct($w): if $w == null then "--" else "\(($w.pct) | floor)%" end;
 
     .accounts[]
     | (.usage // .lastGoodUsage) as $u
