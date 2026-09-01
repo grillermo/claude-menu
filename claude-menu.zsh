@@ -1,4 +1,4 @@
-# Wrap `claude` to pick a cswap profile via a gum menu before launching. The
+# Wrap `claude` to pick a cswap profile via an fzf menu before launching. The
 # profile functions (claude-personal, claude-personal-2, claude-work) live in
 # custom_functions.zsh in the zsh dotfiles repo.
 #
@@ -57,8 +57,8 @@ _claude_usage_rows() {
 }
 
 _claude_menu() {
-  if ! command -v gum > /dev/null 2>&1; then
-    echo "gum is not installed. Install with: brew install gum" >&2
+  if ! command -v fzf > /dev/null 2>&1; then
+    echo "fzf is not installed. Install with: brew install fzf" >&2
     return 1
   fi
 
@@ -117,7 +117,7 @@ _claude_menu() {
     opts=("$head[@]" "$rest[@]")
   fi
 
-  # gum prefixes every row with its 2-char cursor, so indent the column
+  # fzf prefixes every row with its 2-char pointer, so indent the column
   # headers to match. Args go up here rather than repeated on every row.
   local header="Which Claude account?${args:+  (claude $args)}"
   if (( ${#pct5} )); then
@@ -125,8 +125,14 @@ _claude_menu() {
       $wAcct ACCOUNT $w5 5H $w7 7D $wRes RESETS STATUS)
   fi
 
+  # fzf rather than `gum choose` because gum's list wraps around at both ends
+  # (up from the top lands on the bottom row) with no flag to turn it off; fzf
+  # stops at the ends unless --cycle is passed. --no-sort keeps our ordering,
+  # so the last-used-here profile stays pinned to the top even while filtering.
   local choice
-  choice=$(gum choose --header "$header" "$opts[@]") || return $?
+  choice=$(printf '%s\n' "$opts[@]" |
+    fzf --no-multi --no-sort --reverse --info=hidden \
+        --height='~100%' --header "$header") || return $?
 
   local profile="$profile_of[${choice%% *}]"
   _claude_record_profile "$profile"
