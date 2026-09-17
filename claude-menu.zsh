@@ -26,33 +26,23 @@ _claude_record_profile() {
   printf '%s\t%s\t%s\n' "$(date +%s)" "$PWD" "$1" >> "$hist"
 }
 
-# One tab-separated "<email> <5h%> <7d%> <resets> <status>" row per cswap
-# account, e.g.  hola@grillermo.com<TAB>3%<TAB>8%<TAB>3h 27m<TAB>
-# Accounts cswap can't currently read fall back to their last good numbers,
-# tagged "(stale)" with the reason. Prints nothing (rc 0) when cswap or jq is
-# missing so the menu degrades to bare emails instead of failing.
+# Where the usage numbers come from: a small JSON endpoint returning one object
+# per account, [{account_email, five_hour_usage, weekly_usage}, ...], with both
+# figures as percentages *used*.
+: ${CLAUDE_USAGE_URL:=https://my-claude-usage.chiq.me}
+
+# One tab-separated "<email> <5h%> <7d%>" row per account, e.g.
+# hola@grillermo.com<TAB>50%<TAB>57%
+# Prints nothing (rc 0) when curl/jq are missing or the endpoint is unreachable,
+# so the menu degrades to bare emails instead of failing or hanging.
 _claude_usage_rows() {
-  command -v cswap > /dev/null 2>&1 || return 0
-  command -v jq    > /dev/null 2>&1 || return 0
+  command -v curl > /dev/null 2>&1 || return 0
+  command -v jq   > /dev/null 2>&1 || return 0
 
-  cswap list --json 2>/dev/null | jq -r '
-    # cswap reports .pct as quota *remaining* (it picks switch targets by
-    # remaining headroom); invert it so the menu shows what you have *used*.
-    def pct($w): if $w == null then "--" else "\(($w.pct) | floor)%" end;
+  curl -fsS --max-time 3 "$CLAUDE_USAGE_URL" 2>/dev/null | jq -r '
+    def pct($v): if $v == null then "--" else "\($v | floor)%" end;
 
-    .accounts[]
-    | (.usage // .lastGoodUsage) as $u
-    | [ .email,
-        pct($u.fiveHour),
-        pct($u.sevenDay),
-        # A last-good countdown has kept ticking down to 0m, so only show it
-        # alongside a live reading.
-        (if .usage and $u.fiveHour.countdown then $u.fiveHour.countdown else "" end),
-        ( [ (if .active then "● active" else empty end),
-            (if .usageStatus == "ok" then empty
-               else "⚠ \(.usageStatus | gsub("_"; " ")) (stale)" end) ]
-          | join("  ") )
-      ] | @tsv
+    .[] | [ .account_email, pct(.five_hour_usage), pct(.weekly_usage) ] | @tsv
   ' 2>/dev/null
 }
 
@@ -70,14 +60,13 @@ _claude_menu() {
   local args="$*"
 
   # Live 5h/7d usage per account, keyed by the same emails the profile
-  # functions pass to cswap. Absent when cswap has nothing to say.
-  local -A pct5 pct7 resets note
+  # functions pass to cswap. Absent when the usage endpoint has nothing to say.
+  local -A pct5 pct7
   local line
   local -a col
   for line in ${(f)"$(_claude_usage_rows)"}; do
     col=("${(@s:	:)line}")
     pct5[$col[1]]=$col[2]; pct7[$col[1]]=$col[3]
-    resets[$col[1]]=$col[4]; note[$col[1]]=$col[5]
   done
 
   # Rows are labelled by account email — that's what the usage belongs to — but
@@ -85,23 +74,20 @@ _claude_menu() {
   local -A profile_of
   local p e
   # Column widths, seeded with the headers so those never overflow their column.
-  local -i wAcct=7 w5=2 w7=2 wRes=6   # len of ACCOUNT / 5H / 7D / RESETS
+  local -i wAcct=7 w5=2 w7=2   # len of ACCOUNT / 5H / 7D
   for p in $CLAUDE_PROFILES; do
     e=$CLAUDE_PROFILE_EMAILS[$p]
     profile_of[$e]=$p
-    (( ${#e}           > wAcct )) && wAcct=${#e}
-    (( ${#pct5[$e]}    > w5    )) && w5=${#pct5[$e]}
-    (( ${#pct7[$e]}    > w7    )) && w7=${#pct7[$e]}
-    (( ${#resets[$e]}  > wRes  )) && wRes=${#resets[$e]}
+    (( ${#e}        > wAcct )) && wAcct=${#e}
+    (( ${#pct5[$e]} > w5    )) && w5=${#pct5[$e]}
+    (( ${#pct7[$e]} > w7    )) && w7=${#pct7[$e]}
   done
 
   local -a opts=()
   local row
   for p in $CLAUDE_PROFILES; do
     e=$CLAUDE_PROFILE_EMAILS[$p]
-    row=$(printf '%-*s  %*s  %*s  %*s' \
-      $wAcct "$e" $w5 "$pct5[$e]" $w7 "$pct7[$e]" $wRes "$resets[$e]")
-    row+="${note[$e]:+  $note[$e]}"
+    row=$(printf '%-*s  %*s  %*s' $wAcct "$e" $w5 "$pct5[$e]" $w7 "$pct7[$e]")
     opts+=("${row%"${row##*[![:space:]]}"}")   # drop the padding of empty tail columns
   done
 
@@ -121,8 +107,7 @@ _claude_menu() {
   # headers to match. Args go up here rather than repeated on every row.
   local header="Which Claude account?${args:+  (claude $args)}"
   if (( ${#pct5} )); then
-    header+=$(printf '\n  %-*s  %*s  %*s  %*s  %s' \
-      $wAcct ACCOUNT $w5 5H $w7 7D $wRes RESETS STATUS)
+    header+=$(printf '\n  %-*s  %*s  %*s' $wAcct ACCOUNT $w5 5H $w7 7D)
   fi
 
   # fzf rather than `gum choose` because gum's list wraps around at both ends
