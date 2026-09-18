@@ -2,28 +2,42 @@
 # profile functions (claude-personal, claude-personal-2, claude-work) live in
 # custom_functions.zsh in the zsh dotfiles repo.
 #
+# The menu only shows up when there's a real question to answer: the first time
+# you run claude in a repo, or when the account you picked there has hit 100%.
+# Otherwise it launches that account straight away. `claude-pick` always asks.
+#
 # This file is sourced from that repo's aliases.zsh. The wrapper is installed
 # under a private name (_claude_menu) so it survives the claude-auto-retry
 # snippet in ~/.zshrc, which is sourced *after* aliases.zsh and redefines
 # `claude`.
 
-# Selections are logged per-directory so the menu can offer the profile you last
-# picked here as the first (default) choice. Capture this file's own dir at
-# source time — inside a function $0 is the function name, not this file.
+# Selections are logged per-repo so a directory you've already answered for
+# launches straight into that account. Capture this file's own dir at source
+# time — inside a function $0 is the function name, not this file.
 _CLAUDE_SELECT_DIR="${0:A:h}"
 
-# Profile most recently chosen in $PWD, printed on stdout (nothing if none).
+# The key selections are stored under: the *main* worktree's root, so every
+# linked worktree of a repo shares one decision instead of asking again per
+# branch. --git-common-dir points at the main repo's .git from inside any
+# worktree; outside a repo the directory itself is the key.
+_claude_repo_key() {
+  local common
+  common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+  [[ -n "$common" ]] && print -r -- "${common:A:h}" || print -r -- "${PWD:A}"
+}
+
+# Profile most recently chosen for this repo, printed on stdout (nothing if none).
 _claude_last_profile() {
   local hist="$_CLAUDE_SELECT_DIR/selection-history"
   [[ -r "$hist" ]] || return 1
-  awk -F'\t' -v d="$PWD" '$2 == d { p = $3 } END { if (p != "") print p }' "$hist"
+  awk -F'\t' -v d="$(_claude_repo_key)" '$2 == d { p = $3 } END { if (p != "") print p }' "$hist"
 }
 
-# Append the chosen profile for $PWD to the history log.
+# Append the chosen profile for this repo to the history log.
 _claude_record_profile() {
   local hist="$_CLAUDE_SELECT_DIR/selection-history"
   mkdir -p "$_CLAUDE_SELECT_DIR" || return
-  printf '%s\t%s\t%s\n' "$(date +%s)" "$PWD" "$1" >> "$hist"
+  printf '%s\t%s\t%s\n' "$(date +%s)" "$(_claude_repo_key)" "$1" >> "$hist"
 }
 
 # Where the usage numbers come from: a small JSON endpoint returning one object
@@ -44,6 +58,18 @@ _claude_usage_rows() {
 
     .[] | [ .account_email, pct(.five_hour_usage), pct(.weekly_usage) ] | @tsv
   ' 2>/dev/null
+}
+
+# True when either usage window for $1 (an account email) is at 100% or more, so
+# the account is worth asking about again. Reads the pct5/pct7 maps out of the
+# calling _claude_menu scope; an unknown figure ("--", or no usage at all) is
+# not treated as maxed — a flaky endpoint shouldn't resurrect the prompt.
+_claude_maxed() {
+  local v
+  for v in "$pct5[$1]" "$pct7[$1]"; do
+    [[ "$v" == <->% ]] && (( ${v%\%} >= 100 )) && return 0
+  done
+  return 1
 }
 
 _claude_menu() {
@@ -69,6 +95,20 @@ _claude_menu() {
     pct5[$col[1]]=$col[2]; pct7[$col[1]]=$col[3]
   done
 
+  # The profile chosen for this repo before. Unless it's maxed out (or you asked
+  # for the menu with claude-pick), that's the answer — don't ask it again.
+  local last email
+  last=$(_claude_last_profile)
+  if [[ -n "$last" ]] && (( ! ${+CLAUDE_PROFILE_EMAILS[$last]} )); then last=; fi
+  if [[ -z "$_CLAUDE_MENU_FORCE" && -n "$last" ]]; then
+    email=$CLAUDE_PROFILE_EMAILS[$last]
+    if ! _claude_maxed "$email"; then
+      print -u2 -r -- "$last  $email${pct5[$email]:+  5h $pct5[$email]  7d $pct7[$email]}"
+      "$last" "$@"
+      return $?
+    fi
+  fi
+
   # Rows are labelled by account email — that's what the usage belongs to — but
   # what we invoke is still the profile function, so keep a way back.
   local -A profile_of
@@ -91,14 +131,21 @@ _claude_menu() {
     opts+=("${row%"${row##*[![:space:]]}"}")   # drop the padding of empty tail columns
   done
 
-  # Float the last-used-here profile to the top so it's the default selection.
-  # The history log still keys on profile names, so map each option back first.
-  local last
-  last=$(_claude_last_profile)
-  if [[ -n "$last" ]]; then
+  # Float a default to the top: normally the profile last used here, but when
+  # that one is maxed out (the only reason we're asking) the first account that
+  # still has headroom. The history log keys on profile names, so map each
+  # option back first.
+  local first=$last
+  if [[ -n "$last" ]] && _claude_maxed "$CLAUDE_PROFILE_EMAILS[$last]"; then
+    first=
+    for p in $CLAUDE_PROFILES; do
+      _claude_maxed "$CLAUDE_PROFILE_EMAILS[$p]" || { first=$p; break }
+    done
+  fi
+  if [[ -n "$first" ]]; then
     local -a head rest o
     for o in "$opts[@]"; do
-      if [[ "$profile_of[${o%% *}]" == "$last" ]]; then head+=("$o"); else rest+=("$o"); fi
+      if [[ "$profile_of[${o%% *}]" == "$first" ]]; then head+=("$o"); else rest+=("$o"); fi
     done
     opts=("$head[@]" "$rest[@]")
   fi
@@ -124,6 +171,10 @@ _claude_menu() {
   "$profile" "$@"
 }
 claude() { _claude_menu "$@" }
+
+# The way back to the menu once a repo has an answer: switch accounts, or just
+# see where the usage stands, without waiting for one to hit 100%.
+claude-pick() { _CLAUDE_MENU_FORCE=1 _claude_menu "$@" }
 
 # ~/.zshrc redefines `claude` (claude-auto-retry) after aliases.zsh loads, so our
 # wrapper loses. Reinstall it with a one-shot precmd hook that runs after
