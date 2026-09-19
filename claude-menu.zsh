@@ -6,9 +6,9 @@
 # you run claude in a repo, or when the account you picked there has hit 100%.
 # Otherwise it launches that account straight away. `claude-pick` always asks.
 #
-# This file is sourced from that repo's aliases.zsh. The wrapper is installed
+# This file is sourced from that repo's programs.zsh. The wrapper is installed
 # under a private name (_claude_menu) so it survives the claude-auto-retry
-# snippet in ~/.zshrc, which is sourced *after* aliases.zsh and redefines
+# snippet in ~/.zshrc, which is sourced *after* programs.zsh and redefines
 # `claude`.
 
 # Selections are logged per-repo so a directory you've already answered for
