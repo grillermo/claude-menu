@@ -3,8 +3,9 @@
 # custom_functions.zsh in the zsh dotfiles repo.
 #
 # The menu only shows up when there's a real question to answer: the first time
-# you run claude in a repo, or when the account you picked there has hit 100%.
-# Otherwise it launches that account straight away. `claude-pick` always asks.
+# you run claude in a repo, when the account you picked there has hit 100%, or
+# when that account has since been deleted from cswap. Otherwise it launches that
+# account straight away. `claude-pick` always asks.
 #
 # This file is sourced from that repo's programs.zsh. The wrapper is installed
 # under a private name (_claude_menu) so it survives the claude-auto-retry
@@ -60,6 +61,20 @@ _claude_usage_rows() {
   ' 2>/dev/null
 }
 
+# One email per line for the accounts cswap still has. An account deleted from
+# cswap can't be launched any more, so this is the source of truth for whether a
+# profile in CLAUDE_PROFILES still means anything. Returns non-zero — rather than
+# an empty list — when cswap or jq is missing or the listing fails, because "no
+# accounts" is itself a real answer the caller has to act on, and a broken lookup
+# must not be mistaken for it.
+_claude_live_accounts() {
+  command -v cswap > /dev/null 2>&1 || return 1
+  command -v jq    > /dev/null 2>&1 || return 1
+  local json
+  json=$(cswap list --json 2>/dev/null) || return 1
+  print -r -- "$json" | jq -r '.accounts[].email' 2>/dev/null || return 1
+}
+
 # True when either usage window for $1 (an account email) is at 100% or more, so
 # the account is worth asking about again. Reads the pct5/pct7 maps out of the
 # calling _claude_menu scope; an unknown figure ("--", or no usage at all) is
@@ -84,6 +99,30 @@ _claude_menu() {
   fi
 
   local args="$*"
+  local p e
+
+  # The profiles still worth offering: those whose cswap account exists. Deleting
+  # an account leaves its profile behind in CLAUDE_PROFILES, and picking it (or
+  # worse, relaunching it from history without asking) would only fail inside
+  # cswap. When cswap can't be read nothing is filtered — see _claude_live_accounts.
+  local -a profiles=()
+  local -A live
+  local -i known=0
+  local accounts
+  if accounts=$(_claude_live_accounts); then
+    known=1
+    for e in ${(f)accounts}; do live[$e]=1; done
+  fi
+  for p in $CLAUDE_PROFILES; do
+    e=$CLAUDE_PROFILE_EMAILS[$p]
+    [[ -n "$e" ]] || continue
+    (( known )) && (( ! ${+live[$e]} )) && continue
+    profiles+=("$p")
+  done
+  if (( ! ${#profiles} )); then
+    echo "No profile in CLAUDE_PROFILES still has a cswap account. Run: cswap add" >&2
+    return 1
+  fi
 
   # Live 5h/7d usage per account, keyed by the same emails the profile
   # functions pass to cswap. Absent when the usage endpoint has nothing to say.
@@ -96,10 +135,12 @@ _claude_menu() {
   done
 
   # The profile chosen for this repo before. Unless it's maxed out (or you asked
-  # for the menu with claude-pick), that's the answer — don't ask it again.
+  # for the menu with claude-pick), that's the answer — don't ask it again. A
+  # profile that's since been removed or had its account deleted isn't an answer
+  # at all: forget it and let the menu ask again.
   local last email
   last=$(_claude_last_profile)
-  if [[ -n "$last" ]] && (( ! ${+CLAUDE_PROFILE_EMAILS[$last]} )); then last=; fi
+  if [[ -n "$last" ]] && (( ! ${profiles[(I)$last]} )); then last=; fi
   if [[ -z "$_CLAUDE_MENU_FORCE" && -n "$last" ]]; then
     email=$CLAUDE_PROFILE_EMAILS[$last]
     if ! _claude_maxed "$email"; then
@@ -112,10 +153,9 @@ _claude_menu() {
   # Rows are labelled by account email — that's what the usage belongs to — but
   # what we invoke is still the profile function, so keep a way back.
   local -A profile_of
-  local p e
   # Column widths, seeded with the headers so those never overflow their column.
   local -i wAcct=7 w5=2 w7=2   # len of ACCOUNT / 5H / 7D
-  for p in $CLAUDE_PROFILES; do
+  for p in $profiles; do
     e=$CLAUDE_PROFILE_EMAILS[$p]
     profile_of[$e]=$p
     (( ${#e}        > wAcct )) && wAcct=${#e}
@@ -125,7 +165,7 @@ _claude_menu() {
 
   local -a opts=()
   local row
-  for p in $CLAUDE_PROFILES; do
+  for p in $profiles; do
     e=$CLAUDE_PROFILE_EMAILS[$p]
     row=$(printf '%-*s  %*s  %*s' $wAcct "$e" $w5 "$pct5[$e]" $w7 "$pct7[$e]")
     opts+=("${row%"${row##*[![:space:]]}"}")   # drop the padding of empty tail columns
@@ -138,7 +178,7 @@ _claude_menu() {
   local first=$last
   if [[ -n "$last" ]] && _claude_maxed "$CLAUDE_PROFILE_EMAILS[$last]"; then
     first=
-    for p in $CLAUDE_PROFILES; do
+    for p in $profiles; do
       _claude_maxed "$CLAUDE_PROFILE_EMAILS[$p]" || { first=$p; break }
     done
   fi
