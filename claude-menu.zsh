@@ -1,6 +1,6 @@
 # Wrap `claude` to pick a cswap profile via an fzf menu before launching. The
-# profile functions (claude-personal, claude-personal-2, claude-work) live in
-# custom_functions.zsh in the zsh dotfiles repo.
+# profiles (CLAUDE_PROFILES / CLAUDE_PROFILE_EMAILS) and the functions that run
+# them (claude-personal, claude-personal-2, claude-work) are defined below.
 #
 # The menu shows up every time, with the account last picked in this repo
 # floated to the top.
@@ -9,6 +9,103 @@
 # under a private name (_claude_menu) so it survives the claude-auto-retry
 # snippet in ~/.zshrc, which is sourced *after* programs.zsh and redefines
 # `claude`.
+
+# Run Claude Code under a cswap profile, inside a tmux session named after the
+# directory + branch. cswap has no session-naming flag, so we own the tmux
+# session ourselves and let cswap just be the command it runs.
+#
+# Every launch gets its own session: when the name is taken we suffix -1, -2, ...
+# rather than attaching to the session already there, so two Claudes can run in
+# the same directory (and the args of the second one aren't dropped).
+#
+# --no-tmux skips the session and runs claude right here. So does already being
+# inside tmux ($TMUX is set): a new session would nest one tmux in another.
+#
+# Which of the two can reach the Keychain depends on where you are, and the
+# answer flips. cswap reads each account's credential backup out of the login
+# Keychain, and those items need an Aqua (GUI) security session: a process in a
+# Background session gets "backup is in the macOS Keychain but it is unreadable
+# right now". `tmux new-session -d` reparents the command onto the tmux *server*,
+# so what matters is the session the server was started in, not this terminal's.
+#
+#   Sitting at the machine   terminal is Aqua. --no-tmux is the safe one; a tmux
+#                            server left over from an SSH login is not.
+#   Over SSH                 this terminal is Background -- verify with
+#                            `launchctl managername`. --no-tmux FAILS here. Plain
+#                            claude-work works, provided the server was started
+#                            from the GUI session.
+#
+# On the 2015 box that last condition is arranged by a LaunchAgent,
+# ~/Library/LaunchAgents/com.grillermo.tmux-server.plist, which sets
+# LimitLoadToSessionType=Aqua and starts a `keychain` session at login. One tmux
+# server per user means every later mbpssh lands on it and inherits the access.
+# Auto-login re-establishes it after a reboot with nothing typed at the machine.
+#
+# Cheapest check, no API call: `cswap switch <n>` from both sides and compare.
+_run_claude_cswap() {
+  local profile=$1
+  shift
+
+  # Ours, not claude's — strip it before anything is forwarded.
+  local -a rest=()
+  local use_tmux=1 arg
+  for arg in "$@"; do
+    if [[ $arg == --no-tmux ]]; then use_tmux=0; else rest+=("$arg"); fi
+  done
+  set -- "${rest[@]}"
+
+  # Already inside a tmux pane: run right here rather than nesting a session.
+  [[ -n $TMUX ]] && use_tmux=0
+
+  if (( ! use_tmux )); then
+    cswap run "$profile" -- --dangerously-skip-permissions "$@"
+    return $?
+  fi
+
+  local base_dir=$(basename "$PWD")
+  local branch_name=$(git branch --show-current 2>/dev/null)
+  local base
+
+  if [[ -n "$branch_name" ]]; then
+    base="claude-${base_dir}-${branch_name}"
+  else
+    base="claude-${base_dir}"
+  fi
+
+  base=${base//[.:\/]/-}
+
+  # Dodge collisions with every session currently running.
+  local session_name=$base
+  local -i n=1
+  while tmux has-session -t "=$session_name" 2>/dev/null; do
+    session_name="${base}-${n}"
+    (( n++ ))
+  done
+
+  # Passing argv as separate words avoids re-quoting through a shell. The zsh
+  # wrapper holds the pane open when claude fails immediately (bad --resume id,
+  # missing credentials); otherwise the pane would die before we attach and all
+  # we'd ever see is tmux's "[exited]".
+  tmux new-session -d -s "$session_name" -c "$PWD" \
+    zsh -c '"$@"; s=$?; if (( s )); then print -u2 -- "\n[claude exited with status $s - press any key to close]"; read -k1; fi; exit $s' \
+    _claude_launch cswap run "$profile" -- --dangerously-skip-permissions "$@" || return $?
+
+  _tmx_attach "$session_name"
+}
+
+# Menu order, and the cswap account each profile runs as. `_claude_menu`
+# (aliases.zsh) reads both: the emails are how it matches a profile to its live
+# usage in `cswap list --json`, so they live here only.
+typeset -ga CLAUDE_PROFILES=(claude-personal claude-personal-2 claude-work)
+typeset -gA CLAUDE_PROFILE_EMAILS=(
+  claude-personal   guillermo.siliceo@gmail.com
+  claude-personal-2 hola@grillermo.com
+  claude-work       guillermo@datacenters.com
+)
+
+claude-personal()   { _run_claude_cswap "$CLAUDE_PROFILE_EMAILS[claude-personal]" "$@" }
+claude-personal-2() { _run_claude_cswap "$CLAUDE_PROFILE_EMAILS[claude-personal-2]" "$@" }
+claude-work()       { _run_claude_cswap "$CLAUDE_PROFILE_EMAILS[claude-work]" "$@" }
 
 # Selections are logged per-repo so the account last picked there can be offered
 # first. Capture this file's own dir at source
