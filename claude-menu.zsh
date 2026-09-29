@@ -6,10 +6,7 @@
 # floated to the top.
 #
 # This file is sourced from ~/c/zsh/programs.zsh (register_fn) and depends on
-# nothing else there. The wrapper is installed
-# under a private name (_claude_menu) so it survives the claude-auto-retry
-# snippet in ~/.zshrc, which is sourced *after* programs.zsh and redefines
-# `claude`.
+# nothing else there.
 
 # Run Claude Code under a cswap profile, inside a tmux session named after the
 # directory + branch. cswap has no session-naming flag, so we own the tmux
@@ -294,14 +291,3 @@ _claude_menu() {
   "$profile" "$@"
 }
 claude() { _claude_menu "$@" }
-
-# ~/.zshrc redefines `claude` (claude-auto-retry) after programs.zsh loads, so our
-# wrapper loses. Reinstall it with a one-shot precmd hook that runs after
-# ~/.zshrc finishes, then removes itself to avoid per-prompt overhead.
-autoload -Uz add-zsh-hook
-_reclaim_claude() {
-  claude() { _claude_menu "$@" }
-  add-zsh-hook -d precmd _reclaim_claude
-  unfunction _reclaim_claude
-}
-add-zsh-hook precmd _reclaim_claude
