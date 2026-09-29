@@ -5,7 +5,8 @@
 # The menu shows up every time, with the account last picked in this repo
 # floated to the top.
 #
-# This file is sourced from that repo's programs.zsh. The wrapper is installed
+# This file is sourced from ~/c/zsh/programs.zsh (register_fn) and depends on
+# nothing else there. The wrapper is installed
 # under a private name (_claude_menu) so it survives the claude-auto-retry
 # snippet in ~/.zshrc, which is sourced *after* programs.zsh and redefines
 # `claude`.
@@ -90,11 +91,12 @@ _run_claude_cswap() {
     zsh -c '"$@"; s=$?; if (( s )); then print -u2 -- "\n[claude exited with status $s - press any key to close]"; read -k1; fi; exit $s' \
     _claude_launch cswap run "$profile" -- --dangerously-skip-permissions "$@" || return $?
 
-  _tmx_attach "$session_name"
+  # Only reached outside tmux, so attach rather than switch-client.
+  command tmux attach -t "=$session_name"
 }
 
 # Menu order, and the cswap account each profile runs as. `_claude_menu`
-# (aliases.zsh) reads both: the emails are how it matches a profile to its live
+# (below) reads both: the emails are how it matches a profile to its live
 # usage in `cswap list --json`, so they live here only.
 typeset -ga CLAUDE_PROFILES=(claude-personal claude-personal-2 claude-work)
 typeset -gA CLAUDE_PROFILE_EMAILS=(
@@ -188,7 +190,7 @@ _claude_menu() {
   fi
 
   if (( ! ${#CLAUDE_PROFILES} )); then
-    echo "CLAUDE_PROFILES is unset; is custom_functions.zsh sourced?" >&2
+    echo "CLAUDE_PROFILES is unset; is claude-menu.zsh sourced?" >&2
     return 1
   fi
 
@@ -293,7 +295,7 @@ _claude_menu() {
 }
 claude() { _claude_menu "$@" }
 
-# ~/.zshrc redefines `claude` (claude-auto-retry) after aliases.zsh loads, so our
+# ~/.zshrc redefines `claude` (claude-auto-retry) after programs.zsh loads, so our
 # wrapper loses. Reinstall it with a one-shot precmd hook that runs after
 # ~/.zshrc finishes, then removes itself to avoid per-prompt overhead.
 autoload -Uz add-zsh-hook
