@@ -3,7 +3,8 @@
 # them (claude-personal, claude-personal-2, claude-work) are defined below.
 #
 # The menu shows up every time, with the account last picked in this repo
-# floated to the top.
+# floated to the top. `claude --last` (alias `cla`) skips the menu and resumes
+# the newest conversation in this directory as the account that had it.
 #
 # This file is sourced from ~/c/zsh/programs.zsh (register_fn) and depends on
 # nothing else there.
@@ -55,8 +56,16 @@ _run_claude_cswap() {
   # Already inside a tmux pane: run right here rather than nesting a session.
   [[ -n $TMUX ]] && use_tmux=0
 
+  # An empty profile means the default ~/.claude login, no cswap at all.
+  local -a cmd
+  if [[ -n $profile ]]; then
+    cmd=(cswap run "$profile" -- --dangerously-skip-permissions)
+  else
+    cmd=(command claude --dangerously-skip-permissions)
+  fi
+
   if (( ! use_tmux )); then
-    cswap run "$profile" -- --dangerously-skip-permissions "$@"
+    "${cmd[@]}" "$@"
     return $?
   fi
 
@@ -86,7 +95,7 @@ _run_claude_cswap() {
   # we'd ever see is tmux's "[exited]".
   tmux new-session -d -s "$session_name" -c "$PWD" \
     zsh -c '"$@"; s=$?; if (( s )); then print -u2 -- "\n[claude exited with status $s - press any key to close]"; read -k1; fi; exit $s' \
-    _claude_launch cswap run "$profile" -- --dangerously-skip-permissions "$@" || return $?
+    _claude_launch "${cmd[@]}" "$@" || return $?
 
   # Only reached outside tmux, so attach rather than switch-client.
   command tmux attach -t "=$session_name"
@@ -290,4 +299,60 @@ _claude_menu() {
   _claude_record_profile "$profile"
   "$profile" "$@"
 }
-claude() { _claude_menu "$@" }
+
+# `claude --last`: resume the newest conversation in this directory, as the
+# account that had it. cswap gives every account its own CLAUDE_CONFIG_DIR, so
+# transcripts are per-account; whichever account wrote the newest one here is
+# the account last used here — whether it was picked in the menu or launched
+# straight through claude-work and friends, which the selection log never sees.
+_claude_resume_last() {
+  local tool
+  for tool in cswap jq; do
+    command -v $tool > /dev/null 2>&1 || { echo "claude --last needs $tool" >&2; return 1 }
+  done
+
+  # cswap's backup root, see claude_swap/paths.py get_backup_root().
+  local root=$HOME/.claude-swap-backup
+  [[ $OSTYPE == linux* ]] && root=${XDG_DATA_HOME:-$HOME/.local/share}/claude-swap
+
+  local json
+  json=$(cswap list --json 2>/dev/null) || { echo "cswap list failed" >&2; return 1 }
+
+  # Claude names a project's transcript dir after its cwd with every
+  # non-alphanumeric character turned into '-'. Account profiles live in
+  # sessions/<num>-<email-slug>; the number alone is unique, so glob on it
+  # rather than re-deriving cswap's slug.
+  local slug=${${PWD:A}//[^a-zA-Z0-9]/-}
+  local num email newest owner
+  local -a f
+  # Plain `claude` (no cswap) writes to the default config dir; it's the
+  # candidate with no owner, resumed without cswap.
+  f=(${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$slug/*.jsonl(N.om[1]))
+  (( $#f )) && newest=$f[1]
+  for num email in ${(f)"$(print -r -- "$json" | jq -r '.accounts[] | "\(.number)\n\(.email)"')"}; do
+    f=($root/sessions/${num}-*/projects/$slug/*.jsonl(N.om[1]))
+    (( $#f )) || continue
+    if [[ -z $newest || $f[1] -nt $newest ]]; then newest=$f[1]; owner=$email; fi
+  done
+
+  if [[ -z $newest ]]; then
+    echo "No Claude conversation found for $PWD" >&2
+    return 1
+  fi
+
+  local id=${newest:t:r} p
+  print -u2 -- "Resuming $id as ${owner:-the default ~/.claude login}"
+  for p in $CLAUDE_PROFILES; do
+    [[ -n $owner && $CLAUDE_PROFILE_EMAILS[$p] == $owner ]] && _claude_record_profile "$p"
+  done
+  _run_claude_cswap "$owner" --resume "$id" "$@"
+}
+
+claude() {
+  if (( ${@[(I)--last]} )); then
+    _claude_resume_last "${@:#--last}"
+  else
+    _claude_menu "$@"
+  fi
+}
+alias cla='claude --last'
