@@ -45,11 +45,17 @@ _run_claude_cswap() {
   local profile=$1
   shift
 
-  # Ours, not claude's — strip it before anything is forwarded.
+  # --no-tmux is ours, not claude's — strip it before anything is forwarded.
+  # So is --dangerously-skip-permissions, which we add ourselves; a pane
+  # tmux-resurrect relaunches still carries it from the saved argv.
   local -a rest=()
   local use_tmux=1 arg
   for arg in "$@"; do
-    if [[ $arg == --no-tmux ]]; then use_tmux=0; else rest+=("$arg"); fi
+    case $arg in
+      --no-tmux) use_tmux=0 ;;
+      --dangerously-skip-permissions) ;;
+      *) rest+=("$arg") ;;
+    esac
   done
   set -- "${rest[@]}"
 
@@ -357,15 +363,14 @@ _claude_menu() {
   "$profile" "$@"
 }
 
-# `claude --last`: resume the newest conversation in this directory, as the
-# account that had it. cswap gives every account its own CLAUDE_CONFIG_DIR, so
-# transcripts are per-account; whichever account wrote the newest one here is
-# the account last used here — whether it was picked in the menu or launched
-# straight through claude-work and friends, which the selection log never sees.
-_claude_resume_last() {
+# Every config dir a conversation can live in, one "<email><TAB><dir>" per line:
+# the default ~/.claude login first, with an empty email because it runs without
+# cswap, then each cswap account's profile. cswap gives every account its own
+# CLAUDE_CONFIG_DIR, so transcripts are per-account.
+_claude_config_dirs() {
   local tool
   for tool in cswap jq; do
-    command -v $tool > /dev/null 2>&1 || { echo "claude --last needs $tool" >&2; return 1 }
+    command -v $tool > /dev/null 2>&1 || { echo "claude-menu needs $tool" >&2; return 1 }
   done
 
   # cswap's backup root, see claude_swap/paths.py get_backup_root().
@@ -375,29 +380,22 @@ _claude_resume_last() {
   local json
   json=$(cswap list --json 2>/dev/null) || { echo "cswap list failed" >&2; return 1 }
 
-  # Claude names a project's transcript dir after its cwd with every
-  # non-alphanumeric character turned into '-'. Account profiles live in
-  # sessions/<num>-<email-slug>; the number alone is unique, so glob on it
-  # rather than re-deriving cswap's slug.
-  local slug=${${PWD:A}//[^a-zA-Z0-9]/-}
-  local num email newest owner
-  local -a f
-  # Plain `claude` (no cswap) writes to the default config dir; it's the
-  # candidate with no owner, resumed without cswap.
-  f=(${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$slug/*.jsonl(N.om[1]))
-  (( $#f )) && newest=$f[1]
+  print -r -- $'\t'"${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+  # Account profiles live in sessions/<num>-<email-slug>; the number alone is
+  # unique, so glob on it rather than re-deriving cswap's slug.
+  local num email dir
   for num email in ${(f)"$(print -r -- "$json" | jq -r '.accounts[] | "\(.number)\n\(.email)"')"}; do
-    f=($root/sessions/${num}-*/projects/$slug/*.jsonl(N.om[1]))
-    (( $#f )) || continue
-    if [[ -z $newest || $f[1] -nt $newest ]]; then newest=$f[1]; owner=$email; fi
+    for dir in $root/sessions/${num}-*(N/); do
+      print -r -- "$email"$'\t'"$dir"
+    done
   done
+}
 
-  if [[ -z $newest ]]; then
-    echo "No Claude conversation found for $PWD" >&2
-    return 1
-  fi
-
-  local id=${newest:t:r} p
+# Resume conversation $1 as $2 (an account email, or empty for the default
+# login), remembering that account for this repo the way the menu would.
+_claude_resume_as() {
+  local id=$1 owner=$2 p
+  shift 2
   print -u2 -- "Resuming $id as ${owner:-the default ~/.claude login}"
   for p in $CLAUDE_PROFILES; do
     [[ -n $owner && $CLAUDE_PROFILE_EMAILS[$p] == $owner ]] && _claude_record_profile "$p"
@@ -405,9 +403,94 @@ _claude_resume_last() {
   _run_claude_cswap "$owner" --resume "$id" "$@"
 }
 
+# `claude --last`: resume the newest conversation in this directory, as the
+# account that had it. Whichever account wrote the newest transcript here is the
+# account last used here — whether it was picked in the menu or launched
+# straight through claude-work and friends, which the selection log never sees.
+_claude_resume_last() {
+  local dirs
+  dirs=$(_claude_config_dirs) || return 1
+
+  # Claude names a project's transcript dir after its cwd with every
+  # non-alphanumeric character turned into '-'.
+  local slug=${${PWD:A}//[^a-zA-Z0-9]/-}
+  local line newest owner
+  local -a f
+  for line in ${(f)dirs}; do
+    f=(${line#*$'\t'}/projects/$slug/*.jsonl(N.om[1]))
+    (( $#f )) || continue
+    if [[ -z $newest || $f[1] -nt $newest ]]; then newest=$f[1]; owner=${line%%$'\t'*}; fi
+  done
+
+  if [[ -z $newest ]]; then
+    echo "No Claude conversation found for $PWD" >&2
+    return 1
+  fi
+
+  _claude_resume_as ${newest:t:r} "$owner" "$@"
+}
+
+# `claude --resume <id>`: a conversation belongs to exactly one account, so
+# resume it as that account instead of asking. Falls back to `claude --last`
+# when no account has the transcript.
+_claude_resume_id() {
+  local id=$1
+  shift
+  local dirs
+  dirs=$(_claude_config_dirs) || return 1
+
+  local line
+  local -a f
+  for line in ${(f)dirs}; do
+    f=(${line#*$'\t'}/projects/*/$id.jsonl(N.))
+    (( $#f )) && { _claude_resume_as "$id" "${line%%$'\t'*}" "$@"; return }
+  done
+
+  print -u2 -- "No account has conversation $id; resuming the newest one here instead"
+  _claude_resume_last "$@"
+}
+
+# Pull a resume id out of claude's argv: sets REPLY to the id (empty if none)
+# and reply to the remaining args. Takes --resume <id>, --resume=<id> and
+# -r <id>; a bare --resume (claude's own picker) is left in place.
+_claude_split_resume() {
+  REPLY=
+  reply=("$@")
+  local -i i
+  for (( i = 1; i <= $#reply; i++ )); do
+    case $reply[i] in
+      --resume=?*) REPLY=${reply[i]#*=}; reply[i]=(); return ;;
+      --resume|-r)
+        [[ -n $reply[i+1] && $reply[i+1] != -* ]] || continue
+        REPLY=$reply[i+1]; reply[i,i+1]=(); return ;;
+    esac
+  done
+}
+
+# What tmux-resurrect relaunches a saved Claude pane with (the
+# "~claude->claude-restore *" entry of @resurrect-processes in ~/.tmux.conf):
+# the saved argv minus the binary. It never shows the account menu, since
+# nobody is at the screen to answer it: a pane saved with --resume <id> comes
+# back as the account that owns <id>, and one saved without (a fresh `claude`,
+# whose id never made it into argv) resumes the newest conversation in its
+# directory, like `cla`.
+claude-restore() {
+  _claude_split_resume "$@"
+  if [[ -n $REPLY ]]; then
+    _claude_resume_id "$REPLY" "${reply[@]}"
+  else
+    _claude_resume_last "${reply[@]}"
+  fi
+}
+
 claude() {
   if (( ${@[(I)--last]} )); then
     _claude_resume_last "${@:#--last}"
+    return
+  fi
+  _claude_split_resume "$@"
+  if [[ -n $REPLY ]]; then
+    _claude_resume_id "$REPLY" "${reply[@]}"
   else
     _claude_menu "$@"
   fi
