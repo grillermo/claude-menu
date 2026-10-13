@@ -496,3 +496,16 @@ claude() {
   fi
 }
 alias cla='claude --last'
+
+# cmux's shell integration redefines claude() from its first precmd hook
+# (_cmux_fix_path), after ~/.zshrc has run, which drops --last and the menu.
+# This hook is added later, so it runs right after that one: take claude back,
+# then remove itself. `command claude` still goes through cmux's PATH shim.
+if [[ -n $CMUX_SHELL_INTEGRATION ]]; then
+  typeset -g _CLAUDE_MENU_FN=$functions[claude]
+  _claude_menu_reclaim() {
+    functions[claude]=$_CLAUDE_MENU_FN
+    precmd_functions=(${precmd_functions:#_claude_menu_reclaim})
+  }
+  precmd_functions+=(_claude_menu_reclaim)
+fi
