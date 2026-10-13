@@ -69,6 +69,11 @@ _run_claude_cswap() {
     return $?
   fi
 
+  # A cold server restores the last tmux-resurrect save first; see
+  # _claude_tmux_settle. REPLY=0 means the placeholder session is ours to drop.
+  _claude_tmux_settle || return $?
+  local placeholder=$REPLY
+
   local base_dir=$(basename "$PWD")
   local branch_name=$(git branch --show-current 2>/dev/null)
   local base
@@ -97,8 +102,60 @@ _run_claude_cswap() {
     zsh -c '"$@"; s=$?; if (( s )); then print -u2 -- "\n[claude exited with status $s - press any key to close]"; read -k1; fi; exit $s' \
     _claude_launch "${cmd[@]}" "$@" || return $?
 
+  # Only now that our session exists: dropping the last one would stop the server.
+  [[ -n $placeholder ]] && tmux kill-session -t "=$placeholder" 2>/dev/null
+
   # Only reached outside tmux, so attach rather than switch-client.
   command tmux attach -t "=$session_name"
+}
+
+# When no tmux server is running, the first `tmux new-session` starts one, and
+# tmux-continuum (@continuum-restore on) restores the last tmux-resurrect save
+# in the background. The restore finishes by calling switch-client to whatever
+# session was active at that save, so a session we had just created and attached
+# to got yanked away a couple of seconds later: `cla` in ~/c landed in some other
+# repo's Claude. Worse, a from-scratch restore overwrites the only pane on the
+# server when a saved session has the same name.
+#
+# So start the server ourselves with a throwaway session named "0", the one
+# session a from-scratch restore deletes when it's done, and wait for resurrect's
+# post-restore-all hook before creating ours. Sets REPLY to "0" when no restore
+# ran and the placeholder is still there for the caller to drop once its own
+# session exists; empty otherwise.
+_claude_tmux_settle() {
+  REPLY=
+  # A live server has restored already (or never will), so nothing can move us.
+  tmux has-session 2>/dev/null && return 0
+
+  tmux new-session -d -s 0 || return $?
+  # Overwrites any hook of your own; ~/.tmux.conf sets none.
+  tmux set -g @resurrect-hook-post-restore-all 'tmux set -g @claude-menu-restored 1'
+
+  # Mirror continuum's own checks, so we only wait when a restore is coming.
+  # resurrect's save dir: @resurrect-dir, else ~/.tmux/resurrect when present,
+  # else the XDG data dir (see tmux-resurrect scripts/helpers.sh).
+  local dir
+  dir=$(tmux show -gqv @resurrect-dir)
+  [[ -z $dir && -d ~/.tmux/resurrect ]] && dir=~/.tmux/resurrect
+  : ${dir:=${XDG_DATA_HOME:-$HOME/.local/share}/tmux/resurrect}
+  dir=${~dir}
+  if [[ $(tmux show -gqv @continuum-restore) != on || -e ~/tmux_no_auto_restore || ! -e $dir/last ]]; then
+    REPLY=0
+    return 0
+  fi
+
+  print -u2 -- "Waiting for tmux-resurrect to restore the saved sessions..."
+  # Continuum sleeps 1s before restoring; a dozen sessions take another 2s.
+  local -i i
+  for (( i = 0; i < 150; i++ )); do
+    if [[ $(tmux show -gqv @claude-menu-restored) == 1 ]]; then
+      # resurrect leaves "0" alone only when the save itself had a session 0.
+      return 0
+    fi
+    sleep 0.2
+  done
+  print -u2 -- "tmux-resurrect didn't finish within 30s; starting anyway"
+  REPLY=0
 }
 
 # Menu order, and the cswap account each profile runs as. `_claude_menu`
