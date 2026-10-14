@@ -342,6 +342,24 @@ _claude_menu() {
     opts=("$head[@]" "$rest[@]")
   fi
 
+  # Embolden the account with the most headroom as a hint to pick it: lowest
+  # weekly usage, then lowest 5h, among those not maxed out with both figures known.
+  local best v5 v7 bestKey key
+  for p in $profiles; do
+    e=$CLAUDE_PROFILE_EMAILS[$p]
+    v5=$pct5[$e] v7=$pct7[$e]
+    [[ "$v5" == <->% && "$v7" == <->% ]] || continue
+    _claude_maxed "$e" && continue
+    key=$(printf '%03d%03d' ${v7%\%} ${v5%\%})
+    if [[ -z "$best" || "$key" < "$bestKey" ]]; then best=$e bestKey=$key; fi
+  done
+  (( ${#profiles} > 1 )) || best=
+  if [[ -n "$best" ]]; then
+    for (( i = 1; i <= ${#opts}; i++ )); do
+      [[ "${opts[i]%% *}" == "$best" ]] && opts[i]=$'\e[1m'"$opts[i]"$'\e[0m'
+    done
+  fi
+
   # fzf prefixes every row with its 2-char pointer, so indent the column
   # headers to match. Args go up here rather than repeated on every row.
   local header="Which Claude account?${args:+  (claude $args)}"
@@ -355,7 +373,7 @@ _claude_menu() {
   # so the last-used-here profile stays pinned to the top even while filtering.
   local choice
   choice=$(printf '%s\n' "$opts[@]" |
-    fzf --no-multi --no-sort --reverse --info=hidden \
+    fzf --ansi --no-multi --no-sort --reverse --info=hidden \
         --height='~100%' --header "$header") || return $?
 
   local profile="$profile_of[${choice%% *}]"
