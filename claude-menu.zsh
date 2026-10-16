@@ -2,7 +2,7 @@
 # profiles (CLAUDE_PROFILES / CLAUDE_PROFILE_EMAILS) and the functions that run
 # them (claude-personal, claude-personal-2, claude-work) are defined below.
 #
-# The menu shows up every time, with the account last picked in this repo
+# The menu shows up every time, with the account that has the most headroom
 # floated to the top. `claude --last` (alias `cla`) skips the menu and resumes
 # the newest conversation in this directory as the account that had it.
 #
@@ -178,34 +178,6 @@ claude-personal()   { _run_claude_cswap "$CLAUDE_PROFILE_EMAILS[claude-personal]
 claude-personal-2() { _run_claude_cswap "$CLAUDE_PROFILE_EMAILS[claude-personal-2]" "$@" }
 claude-work()       { _run_claude_cswap "$CLAUDE_PROFILE_EMAILS[claude-work]" "$@" }
 
-# Selections are logged per-repo so the account last picked there can be offered
-# first. Capture this file's own dir at source
-# time — inside a function $0 is the function name, not this file.
-_CLAUDE_SELECT_DIR="${0:A:h}"
-
-# The key selections are stored under: the *main* worktree's root, so every
-# linked worktree of a repo shares one default instead of one per branch. --git-common-dir points at the main repo's .git from inside any
-# worktree; outside a repo the directory itself is the key.
-_claude_repo_key() {
-  local common
-  common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
-  [[ -n "$common" ]] && print -r -- "${common:A:h}" || print -r -- "${PWD:A}"
-}
-
-# Profile most recently chosen for this repo, printed on stdout (nothing if none).
-_claude_last_profile() {
-  local hist="$_CLAUDE_SELECT_DIR/selection-history"
-  [[ -r "$hist" ]] || return 1
-  awk -F'\t' -v d="$(_claude_repo_key)" '$2 == d { p = $3 } END { if (p != "") print p }' "$hist"
-}
-
-# Append the chosen profile for this repo to the history log.
-_claude_record_profile() {
-  local hist="$_CLAUDE_SELECT_DIR/selection-history"
-  mkdir -p "$_CLAUDE_SELECT_DIR" || return
-  printf '%s\t%s\t%s\n' "$(date +%s)" "$(_claude_repo_key)" "$1" >> "$hist"
-}
-
 # Where the usage numbers come from: a small JSON endpoint returning one object
 # per account, [{account_email, five_hour_usage, weekly_usage}, ...], with both
 # figures as percentages *used*.
@@ -298,11 +270,6 @@ _claude_menu() {
     pct5[$col[1]]=$col[2]; pct7[$col[1]]=$col[3]
   done
 
-  # The profile chosen for this repo before, if it's still on offer.
-  local last
-  last=$(_claude_last_profile)
-  if [[ -n "$last" ]] && (( ! ${profiles[(I)$last]} )); then last=; fi
-
   # Rows are labelled by account email — that's what the usage belongs to — but
   # what we invoke is still the profile function, so keep a way back.
   local -A profile_of
@@ -324,40 +291,26 @@ _claude_menu() {
     opts+=("${row%"${row##*[![:space:]]}"}")   # drop the padding of empty tail columns
   done
 
-  # Float a default to the top: normally the profile last used here, but when
-  # that one is maxed out the first account that still has headroom. The history log keys on profile names, so map each
-  # option back first.
-  local first=$last
-  if [[ -n "$last" ]] && _claude_maxed "$CLAUDE_PROFILE_EMAILS[$last]"; then
-    first=
-    for p in $profiles; do
-      _claude_maxed "$CLAUDE_PROFILE_EMAILS[$p]" || { first=$p; break }
-    done
-  fi
-  if [[ -n "$first" ]]; then
-    local -a head rest o
-    for o in "$opts[@]"; do
-      if [[ "$profile_of[${o%% *}]" == "$first" ]]; then head+=("$o"); else rest+=("$o"); fi
-    done
-    opts=("$head[@]" "$rest[@]")
-  fi
-
-  # Embolden the account with the most headroom as a hint to pick it: lowest
-  # weekly usage, then lowest 5h, among those not maxed out with both figures known.
+  # The default is the account with the most headroom: lowest 5h usage, then
+  # lowest weekly, among those not maxed out with both figures known. It's floated to
+  # the top, where fzf's cursor starts, and emboldened.
   local best v5 v7 bestKey key
   for p in $profiles; do
     e=$CLAUDE_PROFILE_EMAILS[$p]
     v5=$pct5[$e] v7=$pct7[$e]
     [[ "$v5" == <->% && "$v7" == <->% ]] || continue
     _claude_maxed "$e" && continue
-    key=$(printf '%03d%03d' ${v7%\%} ${v5%\%})
+    key=$(printf '%03d%03d' ${v5%\%} ${v7%\%})
     if [[ -z "$best" || "$key" < "$bestKey" ]]; then best=$e bestKey=$key; fi
   done
   (( ${#profiles} > 1 )) || best=
   if [[ -n "$best" ]]; then
-    for (( i = 1; i <= ${#opts}; i++ )); do
-      [[ "${opts[i]%% *}" == "$best" ]] && opts[i]=$'\e[1m'"$opts[i]"$'\e[0m'
+    local -a head rest
+    local o
+    for o in "$opts[@]"; do
+      if [[ "${o%% *}" == "$best" ]]; then head+=($'\e[1m'"$o"$'\e[0m'); else rest+=("$o"); fi
     done
+    opts=("$head[@]" "$rest[@]")
   fi
 
   # fzf prefixes every row with its 2-char pointer, so indent the column
@@ -370,15 +323,13 @@ _claude_menu() {
   # fzf rather than `gum choose` because gum's list wraps around at both ends
   # (up from the top lands on the bottom row) with no flag to turn it off; fzf
   # stops at the ends unless --cycle is passed. --no-sort keeps our ordering,
-  # so the last-used-here profile stays pinned to the top even while filtering.
+  # so the default stays pinned to the top even while filtering.
   local choice
   choice=$(printf '%s\n' "$opts[@]" |
     fzf --ansi --no-multi --no-sort --reverse --info=hidden \
         --height='~100%' --header "$header") || return $?
 
-  local profile="$profile_of[${choice%% *}]"
-  _claude_record_profile "$profile"
-  "$profile" "$@"
+  "$profile_of[${choice%% *}]" "$@"
 }
 
 # Every config dir a conversation can live in, one "<email><TAB><dir>" per line:
@@ -410,21 +361,16 @@ _claude_config_dirs() {
 }
 
 # Resume conversation $1 as $2 (an account email, or empty for the default
-# login), remembering that account for this repo the way the menu would.
+# login).
 _claude_resume_as() {
-  local id=$1 owner=$2 p
+  local id=$1 owner=$2
   shift 2
   print -u2 -- "Resuming $id as ${owner:-the default ~/.claude login}"
-  for p in $CLAUDE_PROFILES; do
-    [[ -n $owner && $CLAUDE_PROFILE_EMAILS[$p] == $owner ]] && _claude_record_profile "$p"
-  done
   _run_claude_cswap "$owner" --resume "$id" "$@"
 }
 
 # `claude --last`: resume the newest conversation in this directory, as the
-# account that had it. Whichever account wrote the newest transcript here is the
-# account last used here — whether it was picked in the menu or launched
-# straight through claude-work and friends, which the selection log never sees.
+# account that had it: whichever account wrote the newest transcript here.
 _claude_resume_last() {
   local dirs
   dirs=$(_claude_config_dirs) || return 1
