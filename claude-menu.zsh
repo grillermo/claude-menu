@@ -1,6 +1,6 @@
 # Wrap `claude` to pick a cswap profile via an fzf menu before launching. The
 # profiles (CLAUDE_PROFILES / CLAUDE_PROFILE_EMAILS) and the functions that run
-# them (claude-personal, claude-personal-2, claude-work) are defined below.
+# them (claude-personal, claude-personal-2) are defined below.
 #
 # The menu shows up every time, with the account that has the most headroom
 # floated to the top. `claude --last` (alias `cla`) skips the menu and resumes
@@ -33,7 +33,7 @@
 #                            server left over from an SSH login is not.
 #   Over SSH                 this terminal is Background -- verify with
 #                            `launchctl managername`. --no-tmux FAILS here. Plain
-#                            claude-work works, provided the server was started
+#                            claude-personal works, provided the server was started
 #                            from the GUI session.
 #
 # On the 2015 box that last condition is arranged by a LaunchAgent,
@@ -169,16 +169,14 @@ _claude_tmux_settle() {
 # Menu order, and the cswap account each profile runs as. `_claude_menu`
 # (below) reads both: the emails are how it matches a profile to its live
 # usage in `cswap list --json`, so they live here only.
-typeset -ga CLAUDE_PROFILES=(claude-personal claude-personal-2 claude-work)
+typeset -ga CLAUDE_PROFILES=(claude-personal claude-personal-2)
 typeset -gA CLAUDE_PROFILE_EMAILS=(
   claude-personal   guillermo.siliceo@gmail.com
   claude-personal-2 hola@grillermo.com
-  claude-work       guillermo@datacenters.com
 )
 
 claude-personal()   { _run_claude_cswap "$CLAUDE_PROFILE_EMAILS[claude-personal]" "$@" }
 claude-personal-2() { _run_claude_cswap "$CLAUDE_PROFILE_EMAILS[claude-personal-2]" "$@" }
-claude-work()       { _run_claude_cswap "$CLAUDE_PROFILE_EMAILS[claude-work]" "$@" }
 
 # Where the usage numbers come from: a small JSON endpoint returning one object
 # per account, [{account_email, five_hour_usage, weekly_usage}, ...], with both
