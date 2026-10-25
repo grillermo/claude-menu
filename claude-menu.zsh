@@ -5,6 +5,8 @@
 # The menu shows up every time, with the account that has the most headroom
 # floated to the top. `claude --last` (alias `cla`) skips the menu and resumes
 # the newest conversation in this directory as the account that had it.
+# `claude --auto` (alias `clauto`) skips the menu too and launches straight as
+# that most-headroom account, e.g. `clauto "fix the failing tests"`.
 #
 # This file is sourced from ~/c/zsh/programs.zsh (register_fn) and depends on
 # nothing else there.
@@ -224,8 +226,14 @@ _claude_maxed() {
   return 1
 }
 
+# With --auto as the first arg, launch the account the menu would have
+# pre-selected instead of showing it. The menu still appears when no account
+# qualifies (usage unknown, or every one maxed), since there is nothing to pick.
 _claude_menu() {
-  if ! command -v fzf > /dev/null 2>&1; then
+  local -i auto=0
+  [[ $1 == --auto ]] && { auto=1; shift }
+
+  if (( ! auto )) && ! command -v fzf > /dev/null 2>&1; then
     echo "fzf is not installed. Install with: brew install fzf" >&2
     return 1
   fi
@@ -303,6 +311,20 @@ _claude_menu() {
     key=$(printf '%03d%03d' ${v5%\%} ${v7%\%})
     if [[ -z "$best" || "$key" < "$bestKey" ]]; then best=$e bestKey=$key; fi
   done
+  if (( auto )); then
+    (( ${#profiles} == 1 )) && best=$CLAUDE_PROFILE_EMAILS[$profiles[1]]
+    if [[ -n "$best" ]]; then
+      print -u2 -- "Launching as $best (${pct5[$best]:---} 5h, ${pct7[$best]:---} 7d)"
+      "$profile_of[$best]" "$@"
+      return
+    fi
+    print -u2 -- "No account has known usage below 100%; pick one"
+    if ! command -v fzf > /dev/null 2>&1; then
+      echo "fzf is not installed. Install with: brew install fzf" >&2
+      return 1
+    fi
+  fi
+
   (( ${#profiles} > 1 )) || best=
   if [[ -n "$best" ]]; then
     local -a head rest
@@ -448,6 +470,12 @@ claude-restore() {
 }
 
 claude() {
+  # --auto is ours: drop it wherever it is, and only the menu acts on it.
+  local -a auto=()
+  if (( ${@[(I)--auto]} )); then
+    auto=(--auto)
+    set -- "${@:#--auto}"
+  fi
   if (( ${@[(I)--last]} )); then
     _claude_resume_last "${@:#--last}"
     return
@@ -456,10 +484,11 @@ claude() {
   if [[ -n $REPLY ]]; then
     _claude_resume_id "$REPLY" "${reply[@]}"
   else
-    _claude_menu "$@"
+    _claude_menu "${auto[@]}" "$@"
   fi
 }
 alias cla='claude --last'
+alias clauto='claude --auto'
 
 # cmux's shell integration redefines claude() from its first precmd hook
 # (_cmux_fix_path), after ~/.zshrc has run, which drops --last and the menu.
