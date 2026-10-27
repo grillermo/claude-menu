@@ -1,26 +1,39 @@
 #!/usr/bin/env python3
-"""Pre-trust a directory for Claude Code.
+"""Pre-answer Claude Code's per-folder consent dialogs for a directory.
 
-Claude Code asks "Do you trust the files in this folder?" the first time it
-runs in a directory, and records the answer in the global config file as
+Claude Code records the answers to two per-folder questions in the global
+config file, keyed by the folder's path:
 
     projects["<path>"].hasTrustDialogAccepted = true
+        (the "Do you trust the files in this folder?" prompt)
+
+    projects["<path>"].hasClaudeMdExternalIncludesApproved = true
+    projects["<path>"].hasClaudeMdExternalIncludesWarningShown = true
+        (the "Allow external CLAUDE.md file imports?" prompt)
 
 where <path> is the realpath of the git repo root when the folder lives in a
 git repo, and the realpath of the folder itself otherwise. The file lives at
 ``$CLAUDE_CONFIG_DIR/.claude.json`` (or ``~/.claude.json`` for the default
 login). cswap profiles get their own copy under the cswap backup root.
 
-This script writes that flag for a given directory into every global config
-file this machine can hold, so the trust dialog never appears for that folder
-again. It only merges -- it never rewrites or drops unrelated keys -- and it
-writes atomically so a running Claude Code process never sees a torn file.
+This script writes those flags for a given directory into every global config
+file this machine can hold, so neither dialog appears for that folder again.
+It only merges -- it never rewrites or drops unrelated keys -- and it writes
+atomically so a running Claude Code process never sees a torn file.
 
 Usage:
     claude-pretrust.py [directory]     # defaults to the current directory
 """
 
 from __future__ import annotations
+
+# The per-project consent flags to seed, and the value each should hold once
+# the user has answered the matching dialog with "yes".
+PROJECT_CONSENT_FLAGS = {
+    "hasTrustDialogAccepted": True,
+    "hasClaudeMdExternalIncludesApproved": True,
+    "hasClaudeMdExternalIncludesWarningShown": True,
+}
 
 import glob
 import json
@@ -122,11 +135,12 @@ def atomic_write(path: str, data: dict) -> None:
         raise
 
 
-def trust(path: str, directory: str) -> bool:
-    """Seed trust for directory into path's projects map. True when changed.
+def seed_consent(path: str, directory: str) -> bool:
+    """Seed the consent flags for directory into path's projects map.
 
-    Only files that already exist are touched, so a profile that has never
-    launched is left for Claude Code to create on its own first run.
+    Returns True when the file changed. Only files that already exist are
+    touched, so a profile that has never launched is left for Claude Code to
+    create on its own first run.
     """
     config = load_config(path)
     if config is None:
@@ -146,10 +160,13 @@ def trust(path: str, directory: str) -> bool:
         entry = projects.get(key)
         if not isinstance(entry, dict):
             entry = {}
-        if entry.get("hasTrustDialogAccepted") is not True:
-            entry = dict(entry)
-            entry["hasTrustDialogAccepted"] = True
-            projects[key] = entry
+        missing = {
+            flag: value
+            for flag, value in PROJECT_CONSENT_FLAGS.items()
+            if entry.get(flag) is not value
+        }
+        if missing:
+            projects[key] = {**entry, **missing}
             changed = True
 
     if not changed:
@@ -168,11 +185,9 @@ def main(argv: list[str]) -> int:
         print(f"claude-pretrust: not a directory: {directory}", file=sys.stderr)
         return 1
 
-    touched = 0
     for path in candidate_config_files():
         try:
-            if trust(path, directory):
-                touched += 1
+            seed_consent(path, directory)
         except OSError as exc:
             print(f"claude-pretrust: could not update {path}: {exc}", file=sys.stderr)
 
