@@ -43,7 +43,22 @@
 # Auto-login re-establishes it after a reboot with nothing typed at the machine.
 #
 # Cheapest check, no API call: `cswap switch <n>` from both sides and compare.
+# Pre-seed workspace trust for the current directory so Claude Code never
+# asks "Do you trust the files in this folder?" again. The flag lives in
+# projects["<realpath>"].hasTrustDialogAccepted inside each .claude.json the
+# machine's profiles read (the default login's and every cswap profile's).
+# Silent and non-fatal: if python3 or the script is missing, the launch just
+# proceeds and the dialog appears once, as before.
+_claude_pretrust() {
+  command -v python3 >/dev/null 2>&1 || return 0
+  local script=$HOME/c/claude-menu/claude-pretrust.py
+  [[ -r $script ]] || return 0
+  python3 "$script" "$PWD" 2>/dev/null
+}
+
 _run_claude_cswap() {
+  _claude_pretrust
+
   local profile=$1
   shift
 

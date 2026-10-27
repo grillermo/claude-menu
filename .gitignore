@@ -1,2 +1,3 @@
 # Per-directory profile selections — local runtime data, not source
 selection-history
+__pycache__/
