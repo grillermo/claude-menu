@@ -16,10 +16,14 @@ git repo, and the realpath of the folder itself otherwise. The file lives at
 ``$CLAUDE_CONFIG_DIR/.claude.json`` (or ``~/.claude.json`` for the default
 login). cswap profiles get their own copy under the cswap backup root.
 
-This script writes those flags for a given directory into every global config
-file this machine can hold, so neither dialog appears for that folder again.
-It only merges -- it never rewrites or drops unrelated keys -- and it writes
-atomically so a running Claude Code process never sees a torn file.
+The trust flag is written for every directory. The external-imports flags are
+written only for directories under ~/c, excluding ~/c/third-parties (where
+third-party checkouts live), so a cloned repository still shows the
+"Allow external CLAUDE.md file imports?" prompt. Override the scope with the
+CLAUDE_PRETRUST_ALLOW_ROOT and CLAUDE_PRETRUST_EXCLUDE environment variables.
+
+The script only merges -- it never rewrites or drops unrelated keys -- and it
+writes atomically so a running Claude Code process never sees a torn file.
 
 Usage:
     claude-pretrust.py [directory]     # defaults to the current directory
@@ -27,10 +31,11 @@ Usage:
 
 from __future__ import annotations
 
-# The per-project consent flags to seed, and the value each should hold once
-# the user has answered the matching dialog with "yes".
-PROJECT_CONSENT_FLAGS = {
-    "hasTrustDialogAccepted": True,
+# The trust flag is always seeded. External CLAUDE.md imports are only
+# auto-approved inside the user's own code tree, so a third-party checkout
+# still asks before pulling in instructions from outside the repository.
+TRUST_FLAGS = {"hasTrustDialogAccepted": True}
+EXTERNAL_INCLUDES_FLAGS = {
     "hasClaudeMdExternalIncludesApproved": True,
     "hasClaudeMdExternalIncludesWarningShown": True,
 }
@@ -45,6 +50,40 @@ import tempfile
 
 def _realpath(path: str) -> str:
     return os.path.realpath(os.path.abspath(os.path.expanduser(path)))
+
+
+def _within(path: str, base: str) -> bool:
+    """True when path is base or a descendant of base."""
+    base = base.rstrip(os.sep)
+    return path == base or path.startswith(base + os.sep)
+
+
+def external_scope() -> tuple[str, str]:
+    """(allowed_root, excluded_prefix) for auto-approving external imports."""
+    home = os.path.expanduser("~")
+    allowed = _realpath(
+        os.environ.get("CLAUDE_PRETRUST_ALLOW_ROOT", os.path.join(home, "c"))
+    )
+    excluded = _realpath(
+        os.environ.get(
+            "CLAUDE_PRETRUST_EXCLUDE", os.path.join(home, "c", "third-parties")
+        )
+    )
+    return allowed, excluded
+
+
+def in_external_scope(path: str) -> bool:
+    """Whether external CLAUDE.md imports should be auto-approved for path."""
+    allowed, excluded = external_scope()
+    return _within(path, allowed) and not _within(path, excluded)
+
+
+def flags_for(key: str) -> dict:
+    """The consent flags to seed for a project path, given the scope rules."""
+    flags = dict(TRUST_FLAGS)
+    if in_external_scope(key):
+        flags.update(EXTERNAL_INCLUDES_FLAGS)
+    return flags
 
 
 def git_root(directory: str) -> str | None:
@@ -162,7 +201,7 @@ def seed_consent(path: str, directory: str) -> bool:
             entry = {}
         missing = {
             flag: value
-            for flag, value in PROJECT_CONSENT_FLAGS.items()
+            for flag, value in flags_for(key).items()
             if entry.get(flag) is not value
         }
         if missing:
