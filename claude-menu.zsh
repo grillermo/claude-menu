@@ -186,14 +186,16 @@ _claude_tmux_settle() {
 # Menu order, and the cswap account each profile runs as. `_claude_menu`
 # (below) reads both: the emails are how it matches a profile to its live
 # usage in `cswap list --json`, so they live here only.
-typeset -ga CLAUDE_PROFILES=(claude-personal claude-personal-2)
+typeset -ga CLAUDE_PROFILES=(claude-personal claude-personal-2 claude-personal-3)
 typeset -gA CLAUDE_PROFILE_EMAILS=(
   claude-personal   guillermo.siliceo@gmail.com
   claude-personal-2 hola@grillermo.com
+  claude-personal-3 claude@grillermo.com
 )
 
 claude-personal()   { _run_claude_cswap "$CLAUDE_PROFILE_EMAILS[claude-personal]" "$@" }
 claude-personal-2() { _run_claude_cswap "$CLAUDE_PROFILE_EMAILS[claude-personal-2]" "$@" }
+claude-personal-3() { _run_claude_cswap "$CLAUDE_PROFILE_EMAILS[claude-personal-3]" "$@" }
 
 # Where the usage numbers come from: a small JSON endpoint returning one object
 # per account, [{account_email, five_hour_usage, weekly_usage}, ...], with both
