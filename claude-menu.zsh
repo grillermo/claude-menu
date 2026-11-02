@@ -19,8 +19,10 @@
 # rather than attaching to the session already there, so two Claudes can run in
 # the same directory (and the args of the second one aren't dropped).
 #
-# --no-tmux skips the session and runs claude right here. So does already being
-# inside tmux ($TMUX is set): a new session would nest one tmux in another.
+# --no-tmux skips the session and runs claude right here. Already being inside
+# tmux ($TMUX is set) still gets its own session, created detached on the same
+# server and switched to, rather than nesting one tmux in another; the pane you
+# typed in stays behind at its prompt.
 #
 # Which of the two can reach the Keychain depends on where you are, and the
 # answer flips. cswap reads each account's credential backup out of the login
@@ -78,9 +80,6 @@ _run_claude_cswap() {
   done
   set -- "${rest[@]}"
 
-  # Already inside a tmux pane: run right here rather than nesting a session.
-  [[ -n $TMUX ]] && use_tmux=0
-
   # An empty profile means the default ~/.claude login, no cswap at all.
   local -a cmd
   if [[ -n $profile ]]; then
@@ -96,8 +95,12 @@ _run_claude_cswap() {
 
   # A cold server restores the last tmux-resurrect save first; see
   # _claude_tmux_settle. REPLY=0 means the placeholder session is ours to drop.
-  _claude_tmux_settle || return $?
-  local placeholder=$REPLY
+  # Inside tmux the server is ours already and has long finished restoring.
+  local placeholder=
+  if [[ -z $TMUX ]]; then
+    _claude_tmux_settle || return $?
+    placeholder=$REPLY
+  fi
 
   local base_dir=$(basename "$PWD")
   local branch_name=$(git branch --show-current 2>/dev/null)
@@ -130,8 +133,12 @@ _run_claude_cswap() {
   # Only now that our session exists: dropping the last one would stop the server.
   [[ -n $placeholder ]] && tmux kill-session -t "=$placeholder" 2>/dev/null
 
-  # Only reached outside tmux, so attach rather than switch-client.
-  command tmux attach -t "=$session_name"
+  # Inside tmux, move this client over; attaching would nest.
+  if [[ -n $TMUX ]]; then
+    tmux switch-client -t "=$session_name"
+  else
+    command tmux attach -t "=$session_name"
+  fi
 }
 
 # When no tmux server is running, the first `tmux new-session` starts one, and
@@ -478,7 +485,9 @@ _claude_split_resume() {
 # whose id never made it into argv) resumes the newest conversation in its
 # directory, like `cla`.
 claude-restore() {
-  _claude_split_resume "$@"
+  # resurrect already put this pane in the right session: run claude in it
+  # rather than escaping to a new session and leaving the pane empty.
+  _claude_split_resume "$@" --no-tmux
   if [[ -n $REPLY ]]; then
     _claude_resume_id "$REPLY" "${reply[@]}"
   else
