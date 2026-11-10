@@ -11,12 +11,38 @@
 # This file is sourced from ~/c/zsh/programs.zsh (register_fn) and depends on
 # nothing else there.
 
-# Run Claude Code under a cswap profile, right here in this terminal.
+# Run Claude Code under a cswap profile, inside a tmux session named after the
+# directory + branch. cswap has no session-naming flag, so we own the tmux
+# session ourselves and let cswap just be the command it runs.
 #
-# cswap reads each account's credential backup out of the login Keychain, and
-# those items need an Aqua (GUI) security session: over SSH this terminal is
-# Background (verify with `launchctl managername`) and cswap reports "backup is
-# in the macOS Keychain but it is unreadable right now".
+# Every launch gets its own session: when the name is taken we suffix -1, -2, ...
+# rather than attaching to the session already there, so two Claudes can run in
+# the same directory (and the args of the second one aren't dropped).
+#
+# --no-tmux skips the session and runs claude right here. Already being inside
+# tmux ($TMUX is set) still gets its own session, created detached on the same
+# server and switched to, rather than nesting one tmux in another; the pane you
+# typed in stays behind at its prompt.
+#
+# Which of the two can reach the Keychain depends on where you are, and the
+# answer flips. cswap reads each account's credential backup out of the login
+# Keychain, and those items need an Aqua (GUI) security session: a process in a
+# Background session gets "backup is in the macOS Keychain but it is unreadable
+# right now". `tmux new-session -d` reparents the command onto the tmux *server*,
+# so what matters is the session the server was started in, not this terminal's.
+#
+#   Sitting at the machine   terminal is Aqua. --no-tmux is the safe one; a tmux
+#                            server left over from an SSH login is not.
+#   Over SSH                 this terminal is Background -- verify with
+#                            `launchctl managername`. --no-tmux FAILS here. Plain
+#                            claude-personal works, provided the server was started
+#                            from the GUI session.
+#
+# On the 2015 box that last condition is arranged by a LaunchAgent,
+# ~/Library/LaunchAgents/com.grillermo.tmux-server.plist, which sets
+# LimitLoadToSessionType=Aqua and starts a `keychain` session at login. One tmux
+# server per user means every later mbpssh lands on it and inherits the access.
+# Auto-login re-establishes it after a reboot with nothing typed at the machine.
 #
 # Cheapest check, no API call: `cswap switch <n>` from both sides and compare.
 # Pre-answer Claude Code's per-folder consent dialogs for the current
@@ -40,25 +66,128 @@ _run_claude_cswap() {
   local profile=$1
   shift
 
-  # --no-tmux is a leftover from when this ran claude in its own tmux session;
-  # old tmux-resurrect saves and habits still pass it, so swallow it. So is
-  # --dangerously-skip-permissions, which we add ourselves.
+  # --no-tmux is ours, not claude's — strip it before anything is forwarded.
+  # So is --dangerously-skip-permissions, which we add ourselves; a pane
+  # tmux-resurrect relaunches still carries it from the saved argv.
   local -a rest=()
-  local arg
+  local use_tmux=1 arg
   for arg in "$@"; do
     case $arg in
-      --no-tmux|--dangerously-skip-permissions) ;;
+      --no-tmux) use_tmux=0 ;;
+      --dangerously-skip-permissions) ;;
       *) rest+=("$arg") ;;
     esac
   done
   set -- "${rest[@]}"
 
   # An empty profile means the default ~/.claude login, no cswap at all.
+  local -a cmd
   if [[ -n $profile ]]; then
-    cswap run "$profile" -- --dangerously-skip-permissions "$@"
+    cmd=(cswap run "$profile" -- --dangerously-skip-permissions)
   else
-    command claude --dangerously-skip-permissions "$@"
+    cmd=(command claude --dangerously-skip-permissions)
   fi
+
+  if (( ! use_tmux )); then
+    "${cmd[@]}" "$@"
+    return $?
+  fi
+
+  # A cold server restores the last tmux-resurrect save first; see
+  # _claude_tmux_settle. REPLY=0 means the placeholder session is ours to drop.
+  # Inside tmux the server is ours already and has long finished restoring.
+  local placeholder=
+  if [[ -z $TMUX ]]; then
+    _claude_tmux_settle || return $?
+    placeholder=$REPLY
+  fi
+
+  local base_dir=$(basename "$PWD")
+  local branch_name=$(git branch --show-current 2>/dev/null)
+  local base
+
+  if [[ -n "$branch_name" ]]; then
+    base="claude-${base_dir}-${branch_name}"
+  else
+    base="claude-${base_dir}"
+  fi
+
+  base=${base//[.:\/]/-}
+
+  # Dodge collisions with every session currently running.
+  local session_name=$base
+  local -i n=1
+  while tmux has-session -t "=$session_name" 2>/dev/null; do
+    session_name="${base}-${n}"
+    (( n++ ))
+  done
+
+  # Passing argv as separate words avoids re-quoting through a shell. The zsh
+  # wrapper holds the pane open when claude fails immediately (bad --resume id,
+  # missing credentials); otherwise the pane would die before we attach and all
+  # we'd ever see is tmux's "[exited]".
+  tmux new-session -d -s "$session_name" -c "$PWD" \
+    zsh -c '"$@"; s=$?; if (( s )); then print -u2 -- "\n[claude exited with status $s - press any key to close]"; read -k1; fi; exit $s' \
+    _claude_launch "${cmd[@]}" "$@" || return $?
+
+  # Only now that our session exists: dropping the last one would stop the server.
+  [[ -n $placeholder ]] && tmux kill-session -t "=$placeholder" 2>/dev/null
+
+  # Inside tmux, move this client over; attaching would nest.
+  if [[ -n $TMUX ]]; then
+    tmux switch-client -t "=$session_name"
+  else
+    command tmux attach -t "=$session_name"
+  fi
+}
+
+# When no tmux server is running, the first `tmux new-session` starts one, and
+# tmux-continuum (@continuum-restore on) restores the last tmux-resurrect save
+# in the background. The restore finishes by calling switch-client to whatever
+# session was active at that save, so a session we had just created and attached
+# to got yanked away a couple of seconds later: `cla` in ~/c landed in some other
+# repo's Claude. Worse, a from-scratch restore overwrites the only pane on the
+# server when a saved session has the same name.
+#
+# So start the server ourselves with a throwaway session named "0", the one
+# session a from-scratch restore deletes when it's done, and wait for resurrect's
+# post-restore-all hook before creating ours. Sets REPLY to "0" when no restore
+# ran and the placeholder is still there for the caller to drop once its own
+# session exists; empty otherwise.
+_claude_tmux_settle() {
+  REPLY=
+  # A live server has restored already (or never will), so nothing can move us.
+  tmux has-session 2>/dev/null && return 0
+
+  tmux new-session -d -s 0 || return $?
+  # Overwrites any hook of your own; ~/.tmux.conf sets none.
+  tmux set -g @resurrect-hook-post-restore-all 'tmux set -g @claude-menu-restored 1'
+
+  # Mirror continuum's own checks, so we only wait when a restore is coming.
+  # resurrect's save dir: @resurrect-dir, else ~/.tmux/resurrect when present,
+  # else the XDG data dir (see tmux-resurrect scripts/helpers.sh).
+  local dir
+  dir=$(tmux show -gqv @resurrect-dir)
+  [[ -z $dir && -d ~/.tmux/resurrect ]] && dir=~/.tmux/resurrect
+  : ${dir:=${XDG_DATA_HOME:-$HOME/.local/share}/tmux/resurrect}
+  dir=${~dir}
+  if [[ $(tmux show -gqv @continuum-restore) != on || -e ~/tmux_no_auto_restore || ! -e $dir/last ]]; then
+    REPLY=0
+    return 0
+  fi
+
+  print -u2 -- "Waiting for tmux-resurrect to restore the saved sessions..."
+  # Continuum sleeps 1s before restoring; a dozen sessions take another 2s.
+  local -i i
+  for (( i = 0; i < 150; i++ )); do
+    if [[ $(tmux show -gqv @claude-menu-restored) == 1 ]]; then
+      # resurrect leaves "0" alone only when the save itself had a session 0.
+      return 0
+    fi
+    sleep 0.2
+  done
+  print -u2 -- "tmux-resurrect didn't finish within 30s; starting anyway"
+  REPLY=0
 }
 
 # Menu order, and the cswap account each profile runs as. `_claude_menu`
@@ -356,7 +485,9 @@ _claude_split_resume() {
 # whose id never made it into argv) resumes the newest conversation in its
 # directory, like `cla`.
 claude-restore() {
-  _claude_split_resume "$@"
+  # resurrect already put this pane in the right session: run claude in it
+  # rather than escaping to a new session and leaving the pane empty.
+  _claude_split_resume "$@" --no-tmux
   if [[ -n $REPLY ]]; then
     _claude_resume_id "$REPLY" "${reply[@]}"
   else
