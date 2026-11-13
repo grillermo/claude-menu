@@ -3,10 +3,11 @@
 # them (claude-personal, claude-personal-2) are defined below.
 #
 # The menu shows up every time, with the account that has the most headroom
-# floated to the top. `claude --last` (alias `cla`) skips the menu and resumes
-# the newest conversation in this directory as the account that had it.
-# `claude --auto` (alias `clauto`) skips the menu too and launches straight as
-# that most-headroom account, e.g. `clauto "fix the failing tests"`.
+# floated to the top. `claude --auto` (alias `clauto`) skips the menu and
+# launches straight as that most-headroom account, e.g. `clauto "fix the
+# failing tests"`. `claude --last` (alias `cla`) does the same with claude's own
+# --continue, resuming the newest conversation in this directory. cswap shares
+# one chat history across accounts, so which account resumes it doesn't matter.
 #
 # This file is sourced from ~/c/zsh/programs.zsh (register_fn) and depends on
 # nothing else there.
@@ -252,10 +253,12 @@ _claude_maxed() {
 
 # With --auto as the first arg, launch the account the menu would have
 # pre-selected instead of showing it. The menu still appears when no account
-# qualifies (usage unknown, or every one maxed), since there is nothing to pick.
+# qualifies (usage unknown, or every one maxed), since there is nothing to pick,
+# unless --unattended follows --auto: then the first profile is launched.
 _claude_menu() {
-  local -i auto=0
+  local -i auto=0 unattended=0
   [[ $1 == --auto ]] && { auto=1; shift }
+  [[ $1 == --unattended ]] && { unattended=1; shift }
 
   if (( ! auto )) && ! command -v fzf > /dev/null 2>&1; then
     echo "fzf is not installed. Install with: brew install fzf" >&2
@@ -342,6 +345,12 @@ _claude_menu() {
       "$profile_of[$best]" "$@"
       return
     fi
+    if (( unattended )); then
+      # Nobody to ask: take the first profile in menu order.
+      print -u2 -- "No account has known usage below 100%; launching as $CLAUDE_PROFILE_EMAILS[$profiles[1]]"
+      "$profiles[1]" "$@"
+      return
+    fi
     print -u2 -- "No account has known usage below 100%; pick one"
     if ! command -v fzf > /dev/null 2>&1; then
       echo "fzf is not installed. Install with: brew install fzf" >&2
@@ -378,140 +387,48 @@ _claude_menu() {
   "$profile_of[${choice%% *}]" "$@"
 }
 
-# Every config dir a conversation can live in, one "<email><TAB><dir>" per line:
-# the default ~/.claude login first, with an empty email because it runs without
-# cswap, then each cswap account's profile. cswap gives every account its own
-# CLAUDE_CONFIG_DIR, so transcripts are per-account.
-_claude_config_dirs() {
-  local tool
-  for tool in cswap jq; do
-    command -v $tool > /dev/null 2>&1 || { echo "claude-menu needs $tool" >&2; return 1 }
-  done
-
-  # cswap's backup root, see claude_swap/paths.py get_backup_root().
-  local root=$HOME/.claude-swap-backup
-  [[ $OSTYPE == linux* ]] && root=${XDG_DATA_HOME:-$HOME/.local/share}/claude-swap
-
-  local json
-  json=$(cswap list --json 2>/dev/null) || { echo "cswap list failed" >&2; return 1 }
-
-  print -r -- $'\t'"${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-  # Account profiles live in sessions/<num>-<email-slug>; the number alone is
-  # unique, so glob on it rather than re-deriving cswap's slug.
-  local num email dir
-  for num email in ${(f)"$(print -r -- "$json" | jq -r '.accounts[] | "\(.number)\n\(.email)"')"}; do
-    for dir in $root/sessions/${num}-*(N/); do
-      print -r -- "$email"$'\t'"$dir"
-    done
-  done
-}
-
-# Resume conversation $1 as $2 (an account email, or empty for the default
-# login).
-_claude_resume_as() {
-  local id=$1 owner=$2
-  shift 2
-  print -u2 -- "Resuming $id as ${owner:-the default ~/.claude login}"
-  _run_claude_cswap "$owner" --resume "$id" "$@"
-}
-
-# `claude --last`: resume the newest conversation in this directory, as the
-# account that had it: whichever account wrote the newest transcript here.
-_claude_resume_last() {
-  local dirs
-  dirs=$(_claude_config_dirs) || return 1
-
-  # Claude names a project's transcript dir after its cwd with every
-  # non-alphanumeric character turned into '-'.
-  local slug=${${PWD:A}//[^a-zA-Z0-9]/-}
-  local line newest owner
-  local -a f
-  for line in ${(f)dirs}; do
-    f=(${line#*$'\t'}/projects/$slug/*.jsonl(N.om[1]))
-    (( $#f )) || continue
-    if [[ -z $newest || $f[1] -nt $newest ]]; then newest=$f[1]; owner=${line%%$'\t'*}; fi
-  done
-
-  if [[ -z $newest ]]; then
-    echo "No Claude conversation found for $PWD" >&2
-    return 1
-  fi
-
-  _claude_resume_as ${newest:t:r} "$owner" "$@"
-}
-
-# `claude --resume <id>`: a conversation belongs to exactly one account, so
-# resume it as that account instead of asking. Falls back to `claude --last`
-# when no account has the transcript.
-_claude_resume_id() {
-  local id=$1
-  shift
-  local dirs
-  dirs=$(_claude_config_dirs) || return 1
-
-  local line
-  local -a f
-  for line in ${(f)dirs}; do
-    f=(${line#*$'\t'}/projects/*/$id.jsonl(N.))
-    (( $#f )) && { _claude_resume_as "$id" "${line%%$'\t'*}" "$@"; return }
-  done
-
-  print -u2 -- "No account has conversation $id; resuming the newest one here instead"
-  _claude_resume_last "$@"
-}
-
-# Pull a resume id out of claude's argv: sets REPLY to the id (empty if none)
-# and reply to the remaining args. Takes --resume <id>, --resume=<id> and
-# -r <id>; a bare --resume (claude's own picker) is left in place.
-_claude_split_resume() {
-  REPLY=
-  reply=("$@")
-  local -i i
-  for (( i = 1; i <= $#reply; i++ )); do
-    case $reply[i] in
-      --resume=?*) REPLY=${reply[i]#*=}; reply[i]=(); return ;;
-      --resume|-r)
-        [[ -n $reply[i+1] && $reply[i+1] != -* ]] || continue
-        REPLY=$reply[i+1]; reply[i,i+1]=(); return ;;
+# Whether claude's argv already names what to resume: --resume/-r (with or
+# without an id), --resume=<id>, or --continue/-c.
+_claude_resumes() {
+  local arg
+  for arg in "$@"; do
+    case $arg in
+      --resume|--resume=*|-r|--continue|-c) return 0 ;;
     esac
   done
+  return 1
 }
 
 # What tmux-resurrect relaunches a saved Claude pane with (the
 # "~claude->claude-restore *" entry of @resurrect-processes in ~/.tmux.conf):
-# the saved argv minus the binary. It never shows the account menu, since
-# nobody is at the screen to answer it: a pane saved with --resume <id> comes
-# back as the account that owns <id>, and one saved without (a fresh `claude`,
-# whose id never made it into argv) resumes the newest conversation in its
-# directory, like `cla`.
+# the saved argv minus the binary. Nobody is at the screen, so it never shows
+# the account menu: it launches as the account with the most headroom, or the
+# first profile when no usage is known. A pane saved with --resume <id> comes
+# back with that conversation; one saved without (a fresh `claude`, whose id
+# never made it into argv) continues the newest conversation in its directory,
+# like `cla`. cswap shares one chat history across accounts, so any account
+# can resume any conversation.
 claude-restore() {
+  _claude_resumes "$@" || set -- "$@" --continue
   # resurrect already put this pane in the right session: run claude in it
   # rather than escaping to a new session and leaving the pane empty.
-  _claude_split_resume "$@" --no-tmux
-  if [[ -n $REPLY ]]; then
-    _claude_resume_id "$REPLY" "${reply[@]}"
-  else
-    _claude_resume_last "${reply[@]}"
-  fi
+  _claude_menu --auto --unattended "$@" --no-tmux
 }
 
 claude() {
-  # --auto is ours: drop it wherever it is, and only the menu acts on it.
+  # --auto and --last are ours: drop them wherever they are. --last is --auto
+  # plus claude's own --continue (the newest conversation in this directory).
   local -a auto=()
   if (( ${@[(I)--auto]} )); then
     auto=(--auto)
     set -- "${@:#--auto}"
   fi
   if (( ${@[(I)--last]} )); then
-    _claude_resume_last "${@:#--last}"
-    return
+    auto=(--auto)
+    set -- "${@:#--last}"
+    _claude_resumes "$@" || set -- "$@" --continue
   fi
-  _claude_split_resume "$@"
-  if [[ -n $REPLY ]]; then
-    _claude_resume_id "$REPLY" "${reply[@]}"
-  else
-    _claude_menu "${auto[@]}" "$@"
-  fi
+  _claude_menu "${auto[@]}" "$@"
 }
 alias cla='claude --last'
 alias clauto='claude --auto'
