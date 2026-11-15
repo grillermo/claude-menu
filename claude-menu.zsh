@@ -16,9 +16,10 @@
 # directory + branch. cswap has no session-naming flag, so we own the tmux
 # session ourselves and let cswap just be the command it runs.
 #
-# Every launch gets its own session: when the name is taken we suffix -1, -2, ...
-# rather than attaching to the session already there, so two Claudes can run in
-# the same directory (and the args of the second one aren't dropped).
+# A launch reuses the session already there for this directory + branch: it
+# attaches to it (any args are dropped, since that Claude is already running).
+# --new-session instead gives the launch its own session, suffixing -1, -2, ...
+# when the name is taken, so two Claudes can run in the same directory.
 #
 # --no-tmux skips the session and runs claude right here. Already being inside
 # tmux ($TMUX is set) still gets its own session, created detached on the same
@@ -67,14 +68,16 @@ _run_claude_cswap() {
   local profile=$1
   shift
 
-  # --no-tmux is ours, not claude's — strip it before anything is forwarded.
+  # --no-tmux and --new-session are ours, not claude's — strip them before
+  # anything is forwarded.
   # So is --dangerously-skip-permissions, which we add ourselves; a pane
   # tmux-resurrect relaunches still carries it from the saved argv.
   local -a rest=()
-  local use_tmux=1 arg
+  local use_tmux=1 new_session=0 arg
   for arg in "$@"; do
     case $arg in
       --no-tmux) use_tmux=0 ;;
+      --new-session) new_session=1 ;;
       --dangerously-skip-permissions) ;;
       *) rest+=("$arg") ;;
     esac
@@ -115,21 +118,25 @@ _run_claude_cswap() {
 
   base=${base//[.:\/]/-}
 
-  # Dodge collisions with every session currently running.
   local session_name=$base
-  local -i n=1
-  while tmux has-session -t "=$session_name" 2>/dev/null; do
-    session_name="${base}-${n}"
-    (( n++ ))
-  done
+  if (( new_session )); then
+    # Dodge collisions with every session currently running.
+    local -i n=1
+    while tmux has-session -t "=$session_name" 2>/dev/null; do
+      session_name="${base}-${n}"
+      (( n++ ))
+    done
+  fi
 
   # Passing argv as separate words avoids re-quoting through a shell. The zsh
   # wrapper holds the pane open when claude fails immediately (bad --resume id,
   # missing credentials); otherwise the pane would die before we attach and all
   # we'd ever see is tmux's "[exited]".
-  tmux new-session -d -s "$session_name" -c "$PWD" \
-    zsh -c '"$@"; s=$?; if (( s )); then print -u2 -- "\n[claude exited with status $s - press any key to close]"; read -k1; fi; exit $s' \
-    _claude_launch "${cmd[@]}" "$@" || return $?
+  if ! tmux has-session -t "=$session_name" 2>/dev/null; then
+    tmux new-session -d -s "$session_name" -c "$PWD" \
+      zsh -c '"$@"; s=$?; if (( s )); then print -u2 -- "\n[claude exited with status $s - press any key to close]"; read -k1; fi; exit $s' \
+      _claude_launch "${cmd[@]}" "$@" || return $?
+  fi
 
   # Only now that our session exists: dropping the last one would stop the server.
   [[ -n $placeholder ]] && tmux kill-session -t "=$placeholder" 2>/dev/null
