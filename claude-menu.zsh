@@ -49,8 +49,8 @@
 # Pre-answer Claude Code's per-folder consent dialogs for the current
 # directory. Trust ("Do you trust the files in this folder?") is answered
 # yes everywhere; "Allow external CLAUDE.md file imports?" is answered yes
-# only under ~/c, excluding ~/c/third-parties, so cloned third-party repos
-# still ask. The flags live in projects["<realpath>"] inside each .claude.json
+# only under ~/c (forks there included), so repos elsewhere still ask.
+# The flags live in projects["<realpath>"] inside each .claude.json
 # the machine's profiles read (the default login's and every cswap profile's).
 # Silent and non-fatal: if python3 or the script is missing, the launch just
 # proceeds and the dialog appears once, as before.

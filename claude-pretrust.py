@@ -17,10 +17,11 @@ git repo, and the realpath of the folder itself otherwise. The file lives at
 login). cswap profiles get their own copy under the cswap backup root.
 
 The trust flag is written for every directory. The external-imports flags are
-written only for directories under ~/c, excluding ~/c/third-parties (where
-third-party checkouts live), so a cloned repository still shows the
-"Allow external CLAUDE.md file imports?" prompt. Override the scope with the
-CLAUDE_PRETRUST_ALLOW_ROOT and CLAUDE_PRETRUST_EXCLUDE environment variables.
+written only for directories under ~/c (every project there, forks included,
+is the user's own), so a repository elsewhere still shows the "Allow external
+CLAUDE.md file imports?" prompt. Override the scope with the
+CLAUDE_PRETRUST_ALLOW_ROOT environment variable, and carve a subtree out of it
+with CLAUDE_PRETRUST_EXCLUDE (unset by default: no exclusion).
 
 The script only merges -- it never rewrites or drops unrelated keys -- and it
 writes atomically so a running Claude Code process never sees a torn file.
@@ -32,7 +33,7 @@ Usage:
 from __future__ import annotations
 
 # The trust flag is always seeded. External CLAUDE.md imports are only
-# auto-approved inside the user's own code tree, so a third-party checkout
+# auto-approved inside the user's own code tree, so a checkout elsewhere
 # still asks before pulling in instructions from outside the repository.
 TRUST_FLAGS = {"hasTrustDialogAccepted": True}
 EXTERNAL_INCLUDES_FLAGS = {
@@ -58,24 +59,23 @@ def _within(path: str, base: str) -> bool:
     return path == base or path.startswith(base + os.sep)
 
 
-def external_scope() -> tuple[str, str]:
-    """(allowed_root, excluded_prefix) for auto-approving external imports."""
+def external_scope() -> tuple[str, str | None]:
+    """(allowed_root, excluded_prefix or None) for auto-approving external imports."""
     home = os.path.expanduser("~")
     allowed = _realpath(
         os.environ.get("CLAUDE_PRETRUST_ALLOW_ROOT", os.path.join(home, "c"))
     )
-    excluded = _realpath(
-        os.environ.get(
-            "CLAUDE_PRETRUST_EXCLUDE", os.path.join(home, "c", "third-parties")
-        )
-    )
+    exclude = os.environ.get("CLAUDE_PRETRUST_EXCLUDE")
+    excluded = _realpath(exclude) if exclude else None
     return allowed, excluded
 
 
 def in_external_scope(path: str) -> bool:
     """Whether external CLAUDE.md imports should be auto-approved for path."""
     allowed, excluded = external_scope()
-    return _within(path, allowed) and not _within(path, excluded)
+    if excluded is not None and _within(path, excluded):
+        return False
+    return _within(path, allowed)
 
 
 def flags_for(key: str) -> dict:
