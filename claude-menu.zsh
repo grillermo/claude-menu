@@ -4,7 +4,8 @@
 #
 # The menu shows up every time, with the account that has the most headroom
 # floated to the top. `claude --auto` (alias `clauto`) skips the menu and
-# launches straight as that most-headroom account, e.g. `clauto "fix the
+# launches straight as that most-headroom account (`clauton` adds
+# --new-session), e.g. `clauto "fix the
 # failing tests"`. `claude --last` (alias `cla`) does the same with claude's own
 # --continue, resuming the newest conversation in this directory. cswap shares
 # one chat history across accounts, so which account resumes it doesn't matter.
@@ -439,6 +440,7 @@ claude() {
 }
 alias cla='claude --last'
 alias clauto='claude --auto'
+alias clauton='clauto --new-session'
 
 # cmux's shell integration redefines claude() from its first precmd hook
 # (_cmux_fix_path), after ~/.zshrc has run, which drops --last and the menu.
