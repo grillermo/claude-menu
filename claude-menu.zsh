@@ -438,9 +438,12 @@ claude() {
   fi
   _claude_menu "${auto[@]}" "$@"
 }
-alias cla='claude --last'
-alias clauto='claude --auto'
-alias clauton='clauto --new-session'
+# Functions, not aliases: launchers like Herdr.app run `zsh -c clauton`, which
+# doesn't expand aliases. unalias first so re-sourcing in an old shell works.
+unalias cla clauto clauton 2>/dev/null
+function cla { claude --last "$@"; }
+function clauto { claude --auto "$@"; }
+function clauton { clauto --new-session "$@"; }
 
 # cmux's shell integration redefines claude() from its first precmd hook
 # (_cmux_fix_path), after ~/.zshrc has run, which drops --last and the menu.
