@@ -1,6 +1,9 @@
-# Wrap `claude` to pick a cswap profile via an fzf menu before launching. The
-# profiles (CLAUDE_PROFILES / CLAUDE_PROFILE_EMAILS) and the functions that run
-# them (claude-personal, claude-personal-2) are defined below.
+# Wrap `claude` to pick a cswap account via a menu before launching. The menu
+# itself is a small Go program (main.go, built next to this file into
+# ./claude-menu); it reads the accounts from `cswap list --json`, annotates
+# them with live usage, and prints the chosen email, which _run_claude_cswap
+# then launches. The claude-personal* functions below stay as direct launchers
+# for a specific account, bypassing the menu.
 #
 # The menu shows up every time, with the account that has the most headroom
 # floated to the top. `claude --auto` (alias `clauto`) skips the menu and
@@ -199,9 +202,12 @@ _claude_tmux_settle() {
   REPLY=0
 }
 
-# Menu order, and the cswap account each profile runs as. `_claude_menu`
-# (below) reads both: the emails are how it matches a profile to its live
-# usage in `cswap list --json`, so they live here only.
+# Direct launchers for a specific account, bypassing the menu. The menu gets
+# its own account list from `cswap list --json`, so these nicknames are only a
+# convenience for launching one account by name (e.g. `claude-personal-2`).
+# Which accounts the *menu* hides lives in the disabled state file instead
+# (~/.config/claude-menu/disabled), toggled by the menu's disable/enable
+# actions — see main.go.
 typeset -ga CLAUDE_PROFILES=(claude-personal claude-personal-2 claude-personal-3)
 typeset -gA CLAUDE_PROFILE_EMAILS=(
   claude-personal   guillermo.siliceo@gmail.com
@@ -209,200 +215,67 @@ typeset -gA CLAUDE_PROFILE_EMAILS=(
   claude-personal-3 claude@grillermo.com
 )
 
-# Profiles temporarily withheld from the menu — e.g. a lapsed subscription you
-# might renew. They keep their CLAUDE_PROFILES entry, email and launcher
-# function, so re-enabling one is just deleting its name from this list. Empty
-# means nothing is hidden. (We disable by hand rather than automatically: the
-# usage endpoint reports a paused account as 0%/0%, same as a fresh unused one,
-# and cswap's cached plan.subscriptionStatus goes stale once its login expires,
-# so neither reliably signals "not paying".)
-typeset -ga CLAUDE_DISABLED_PROFILES=(claude-personal-2)
-
 claude-personal()   { _run_claude_cswap "$CLAUDE_PROFILE_EMAILS[claude-personal]" "$@" }
 claude-personal-2() { _run_claude_cswap "$CLAUDE_PROFILE_EMAILS[claude-personal-2]" "$@" }
 claude-personal-3() { _run_claude_cswap "$CLAUDE_PROFILE_EMAILS[claude-personal-3]" "$@" }
 
-# Where the usage numbers come from: a small JSON endpoint returning one object
-# per account, [{account_email, five_hour_usage, weekly_usage}, ...], with both
-# figures as percentages *used*.
-: ${CLAUDE_USAGE_URL:=https://my-claude-usage.chiq.me}
+# The menu is a Go program built next to this file. Each machine builds its own
+# (binaries aren't git-synced), so build lazily: when the ./claude-menu binary
+# is missing or older than any source, rebuild it. Needs Go and the chicle
+# checkout next door (../chicle, via the replace in go.mod).
+typeset -g _CLAUDE_MENU_DIR=${${(%):-%x}:A:h}
 
-# One tab-separated "<email> <5h%> <7d%>" row per account, e.g.
-# hola@grillermo.com<TAB>50%<TAB>57%
-# Prints nothing (rc 0) when curl/jq are missing or the endpoint is unreachable,
-# so the menu degrades to bare emails instead of failing or hanging.
-_claude_usage_rows() {
-  command -v curl > /dev/null 2>&1 || return 0
-  command -v jq   > /dev/null 2>&1 || return 0
+_claude_menu_build() {
+  local dir=$_CLAUDE_MENU_DIR
+  local bin=$dir/claude-menu
+  local -a src=($dir/*.go(N) $dir/go.mod(N))
+  (( ${#src} )) || { print -u2 -- "claude-menu: no Go sources in $dir"; return 1; }
 
-  curl -fsS --max-time 3 "$CLAUDE_USAGE_URL" 2>/dev/null | jq -r '
-    def pct($v): if $v == null then "--" else "\($v | floor)%" end;
+  # Up to date when the binary exists and nothing is newer than it.
+  if [[ -x $bin ]]; then
+    local f; local -i stale=0
+    for f in $src; do [[ $f -nt $bin ]] && { stale=1; break }; done
+    (( stale )) || return 0
+  fi
 
-    .[] | [ .account_email, pct(.five_hour_usage), pct(.weekly_usage) ] | @tsv
-  ' 2>/dev/null
+  command -v go > /dev/null 2>&1 || {
+    print -u2 -- "claude-menu: Go isn't installed; can't build the picker ($bin)"
+    return 1
+  }
+  print -u2 -- "claude-menu: building the picker…"
+  ( cd "$dir" && go build -o claude-menu . ) || {
+    print -u2 -- "claude-menu: go build failed"
+    return 1
+  }
 }
 
-# One email per line for the accounts cswap still has. An account deleted from
-# cswap can't be launched any more, so this is the source of truth for whether a
-# profile in CLAUDE_PROFILES still means anything. Returns non-zero — rather than
-# an empty list — when cswap or jq is missing or the listing fails, because "no
-# accounts" is itself a real answer the caller has to act on, and a broken lookup
-# must not be mistaken for it.
-_claude_live_accounts() {
-  command -v cswap > /dev/null 2>&1 || return 1
-  command -v jq    > /dev/null 2>&1 || return 1
-  local json
-  json=$(cswap list --json 2>/dev/null) || return 1
-  print -r -- "$json" | jq -r '.accounts[].email' 2>/dev/null || return 1
-}
-
-# True when either usage window for $1 (an account email) is at 100% or more, so
-# it shouldn't be the default. Reads the pct5/pct7 maps out of the
-# calling _claude_menu scope; an unknown figure ("--", or no usage at all) is
-# not treated as maxed.
-_claude_maxed() {
-  local v
-  for v in "$pct5[$1]" "$pct7[$1]"; do
-    [[ "$v" == <->% ]] && (( ${v%\%} >= 100 )) && return 0
-  done
-  return 1
-}
-
-# With --auto as the first arg, launch the account the menu would have
-# pre-selected instead of showing it. The menu still appears when no account
-# qualifies (usage unknown, or every one maxed), since there is nothing to pick,
-# unless --unattended follows --auto: then the first profile is launched.
+# Pick an account and launch it. The Go picker (built above) owns the account
+# list, usage, the disabled state file and the disable/enable actions; here we
+# just hand it our flags, take the chosen email off stdout, and run it. Quitting
+# the picker (empty output / non-zero exit) aborts without launching.
+#
+#   --auto         let the picker choose the most-headroom account with no UI
+#   --unattended   with --auto, when nobody qualifies, take the first account
+#                  instead of showing the menu (for headless relaunches)
+# Everything after those is claude's own argv: forwarded to the launch, and
+# shown in the picker header.
 _claude_menu() {
   local -i auto=0 unattended=0
-  [[ $1 == --auto ]] && { auto=1; shift }
+  [[ $1 == --auto ]]       && { auto=1; shift }
   [[ $1 == --unattended ]] && { unattended=1; shift }
 
-  if (( ! auto )) && ! command -v fzf > /dev/null 2>&1; then
-    echo "fzf is not installed. Install with: brew install fzf" >&2
-    return 1
-  fi
+  _claude_menu_build || return 1
 
-  if (( ! ${#CLAUDE_PROFILES} )); then
-    echo "CLAUDE_PROFILES is unset; is claude-menu.zsh sourced?" >&2
-    return 1
-  fi
+  local -a flags=()
+  (( auto ))       && flags+=(--auto)
+  (( unattended )) && flags+=(--unattended)
+  [[ -n "$*" ]]    && flags+=(--args "$*")
 
-  local args="$*"
-  local p e
+  local email
+  email=$("$_CLAUDE_MENU_DIR/claude-menu" "${flags[@]}") || return $?
+  [[ -n $email ]] || return 1
 
-  # The profiles still worth offering: those whose cswap account exists. Deleting
-  # an account leaves its profile behind in CLAUDE_PROFILES, and picking it would
-  # only fail inside cswap. When cswap can't be read nothing is filtered — see _claude_live_accounts.
-  local -a profiles=()
-  local -A live
-  local -i known=0
-  local accounts
-  if accounts=$(_claude_live_accounts); then
-    known=1
-    for e in ${(f)accounts}; do live[$e]=1; done
-  fi
-  for p in $CLAUDE_PROFILES; do
-    (( ${CLAUDE_DISABLED_PROFILES[(Ie)$p]} )) && continue
-    e=$CLAUDE_PROFILE_EMAILS[$p]
-    [[ -n "$e" ]] || continue
-    (( known )) && (( ! ${+live[$e]} )) && continue
-    profiles+=("$p")
-  done
-  if (( ! ${#profiles} )); then
-    echo "No profile in CLAUDE_PROFILES still has a cswap account. Run: cswap add" >&2
-    return 1
-  fi
-
-  # Live 5h/7d usage per account, keyed by the same emails the profile
-  # functions pass to cswap. Absent when the usage endpoint has nothing to say.
-  local -A pct5 pct7
-  local line
-  local -a col
-  for line in ${(f)"$(_claude_usage_rows)"}; do
-    col=("${(@s:	:)line}")
-    pct5[$col[1]]=$col[2]; pct7[$col[1]]=$col[3]
-  done
-
-  # Rows are labelled by account email — that's what the usage belongs to — but
-  # what we invoke is still the profile function, so keep a way back.
-  local -A profile_of
-  # Column widths, seeded with the headers so those never overflow their column.
-  local -i wAcct=7 w5=2 w7=2   # len of ACCOUNT / 5H / 7D
-  for p in $profiles; do
-    e=$CLAUDE_PROFILE_EMAILS[$p]
-    profile_of[$e]=$p
-    (( ${#e}        > wAcct )) && wAcct=${#e}
-    (( ${#pct5[$e]} > w5    )) && w5=${#pct5[$e]}
-    (( ${#pct7[$e]} > w7    )) && w7=${#pct7[$e]}
-  done
-
-  local -a opts=()
-  local row
-  for p in $profiles; do
-    e=$CLAUDE_PROFILE_EMAILS[$p]
-    row=$(printf '%-*s  %*s  %*s' $wAcct "$e" $w5 "$pct5[$e]" $w7 "$pct7[$e]")
-    opts+=("${row%"${row##*[![:space:]]}"}")   # drop the padding of empty tail columns
-  done
-
-  # The default is the account with the most headroom: lowest 5h usage, then
-  # lowest weekly, among those not maxed out with both figures known. It's floated to
-  # the top, where fzf's cursor starts, and emboldened.
-  local best v5 v7 bestKey key
-  for p in $profiles; do
-    e=$CLAUDE_PROFILE_EMAILS[$p]
-    v5=$pct5[$e] v7=$pct7[$e]
-    [[ "$v5" == <->% && "$v7" == <->% ]] || continue
-    _claude_maxed "$e" && continue
-    key=$(printf '%03d%03d' ${v5%\%} ${v7%\%})
-    if [[ -z "$best" || "$key" < "$bestKey" ]]; then best=$e bestKey=$key; fi
-  done
-  if (( auto )); then
-    (( ${#profiles} == 1 )) && best=$CLAUDE_PROFILE_EMAILS[$profiles[1]]
-    if [[ -n "$best" ]]; then
-      print -u2 -- "Launching as $best (${pct5[$best]:---} 5h, ${pct7[$best]:---} 7d)"
-      "$profile_of[$best]" "$@"
-      return
-    fi
-    if (( unattended )); then
-      # Nobody to ask: take the first profile in menu order.
-      print -u2 -- "No account has known usage below 100%; launching as $CLAUDE_PROFILE_EMAILS[$profiles[1]]"
-      "$profiles[1]" "$@"
-      return
-    fi
-    print -u2 -- "No account has known usage below 100%; pick one"
-    if ! command -v fzf > /dev/null 2>&1; then
-      echo "fzf is not installed. Install with: brew install fzf" >&2
-      return 1
-    fi
-  fi
-
-  (( ${#profiles} > 1 )) || best=
-  if [[ -n "$best" ]]; then
-    local -a head rest
-    local o
-    for o in "$opts[@]"; do
-      if [[ "${o%% *}" == "$best" ]]; then head+=($'\e[1m'"$o"$'\e[0m'); else rest+=("$o"); fi
-    done
-    opts=("$head[@]" "$rest[@]")
-  fi
-
-  # fzf prefixes every row with its 2-char pointer, so indent the column
-  # headers to match. Args go up here rather than repeated on every row.
-  local header="Which Claude account?${args:+  (claude $args)}"
-  if (( ${#pct5} )); then
-    header+=$(printf '\n  %-*s  %*s  %*s' $wAcct ACCOUNT $w5 5H $w7 7D)
-  fi
-
-  # fzf rather than `gum choose` because gum's list wraps around at both ends
-  # (up from the top lands on the bottom row) with no flag to turn it off; fzf
-  # stops at the ends unless --cycle is passed. --no-sort keeps our ordering,
-  # so the default stays pinned to the top even while filtering.
-  local choice
-  choice=$(printf '%s\n' "$opts[@]" |
-    fzf --ansi --no-multi --no-sort --reverse --info=hidden \
-        --height='~100%' --header "$header") || return $?
-
-  "$profile_of[${choice%% *}]" "$@"
+  _run_claude_cswap "$email" "$@"
 }
 
 # Whether claude's argv already names what to resume: --resume/-r (with or

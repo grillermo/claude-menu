@@ -1,3 +1,6 @@
 # Per-directory profile selections — local runtime data, not source
 selection-history
 __pycache__/
+
+# The menu binary, built per-machine from main.go (see claude-menu.zsh).
+/claude-menu
