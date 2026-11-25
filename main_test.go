@@ -47,7 +47,7 @@ func TestMaxed(t *testing.T) {
 func TestBest(t *testing.T) {
 	accts := []account{
 		{Email: "a", Five: f(28), Weekly: f(41)},
-		{Email: "b", Five: f(8), Weekly: f(40)},  // lowest 5h → winner
+		{Email: "b", Five: f(8), Weekly: f(40)},                // lowest 5h → winner
 		{Email: "c", Five: f(0), Weekly: f(0), Disabled: true}, // skipped: disabled
 	}
 	if got := best(accts); got != "b" {
