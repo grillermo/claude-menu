@@ -209,6 +209,15 @@ typeset -gA CLAUDE_PROFILE_EMAILS=(
   claude-personal-3 claude@grillermo.com
 )
 
+# Profiles temporarily withheld from the menu — e.g. a lapsed subscription you
+# might renew. They keep their CLAUDE_PROFILES entry, email and launcher
+# function, so re-enabling one is just deleting its name from this list. Empty
+# means nothing is hidden. (We disable by hand rather than automatically: the
+# usage endpoint reports a paused account as 0%/0%, same as a fresh unused one,
+# and cswap's cached plan.subscriptionStatus goes stale once its login expires,
+# so neither reliably signals "not paying".)
+typeset -ga CLAUDE_DISABLED_PROFILES=(claude-personal-2)
+
 claude-personal()   { _run_claude_cswap "$CLAUDE_PROFILE_EMAILS[claude-personal]" "$@" }
 claude-personal-2() { _run_claude_cswap "$CLAUDE_PROFILE_EMAILS[claude-personal-2]" "$@" }
 claude-personal-3() { _run_claude_cswap "$CLAUDE_PROFILE_EMAILS[claude-personal-3]" "$@" }
@@ -293,6 +302,7 @@ _claude_menu() {
     for e in ${(f)accounts}; do live[$e]=1; done
   fi
   for p in $CLAUDE_PROFILES; do
+    (( ${CLAUDE_DISABLED_PROFILES[(Ie)$p]} )) && continue
     e=$CLAUDE_PROFILE_EMAILS[$p]
     [[ -n "$e" ]] || continue
     (( known )) && (( ! ${+live[$e]} )) && continue
