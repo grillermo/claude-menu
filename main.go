@@ -315,6 +315,23 @@ func main() {
 	}
 
 	// --- interactive picker ---
+	choice, err := chicle.Run(buildConfig(liveEmails, usage, disabled, dpath, argsLabel))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if choice == "" {
+		os.Exit(1) // quit without choosing
+	}
+	fmt.Println(choice)
+}
+
+// buildConfig assembles the chicle picker: the account rows, the ACCOUNT/5H/7D
+// columns, and the open/disable/enable actions. It takes everything it needs as
+// arguments and has no terminal or network side effects of its own (the actions
+// only touch the disabled file at dpath), so a test can drive the resulting
+// Config through chicle.New and assert on View() and Result() — see ux_test.go.
+func buildConfig(liveEmails []string, usage map[string]usageRow, disabled map[string]bool, dpath, argsLabel string) chicle.Config {
 	// buildRows reads the live `disabled` map each time, so it reflects the
 	// disable/enable actions on reload. Usage and the cswap listing are fetched
 	// once and reused.
@@ -374,19 +391,11 @@ func main() {
 	}
 
 	initialRows, _ := buildRows()
-	choice, err := chicle.Run(chicle.Config{
+	return chicle.Config{
 		Title:   title,
 		Columns: cols,
 		Rows:    initialRows,
 		Actions: actions,
 		Reload:  buildRows,
-	})
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
 	}
-	if choice == "" {
-		os.Exit(1) // quit without choosing
-	}
-	fmt.Println(choice)
 }
