@@ -66,8 +66,18 @@ _claude_pretrust() {
   python3 "$script" "$PWD" 2>/dev/null
 }
 
+# _claude_menu starts pretrust in the background so it overlaps the picker
+# (python3 alone is ~80ms) and leaves its pid here; the launch only has to wait
+# for it. The direct launchers (claude-personal*) never set it and run it inline.
+typeset -g _CLAUDE_PRETRUST_PID=
+
 _run_claude_cswap() {
-  _claude_pretrust
+  if [[ -n $_CLAUDE_PRETRUST_PID ]]; then
+    wait $_CLAUDE_PRETRUST_PID 2>/dev/null
+    _CLAUDE_PRETRUST_PID=
+  else
+    _claude_pretrust
+  fi
 
   local profile=$1
   shift
@@ -266,14 +276,25 @@ _claude_menu() {
 
   _claude_menu_build || return 1
 
+  # No job-control chatter ("[1] 12345") for the background pretrust.
+  setopt local_options no_monitor no_notify
+  _claude_pretrust &
+  _CLAUDE_PRETRUST_PID=$!
+
   local -a flags=()
   (( auto ))       && flags+=(--auto)
   (( unattended )) && flags+=(--unattended)
   [[ -n "$*" ]]    && flags+=(--args "$*")
 
   local email
-  email=$("$_CLAUDE_MENU_DIR/claude-menu" "${flags[@]}") || return $?
-  [[ -n $email ]] || return 1
+  email=$("$_CLAUDE_MENU_DIR/claude-menu" "${flags[@]}")
+  local -i st=$?
+  if (( st )) || [[ -z $email ]]; then
+    # Not launching: still let pretrust finish rather than orphan it mid-write.
+    wait $_CLAUDE_PRETRUST_PID 2>/dev/null
+    _CLAUDE_PRETRUST_PID=
+    return $(( st ? st : 1 ))
+  fi
 
   _run_claude_cswap "$email" "$@"
 }
