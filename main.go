@@ -1,6 +1,7 @@
 // Command claude-menu is the account picker behind the `claude` shell wrapper.
-// It gathers the launchable accounts from `cswap list --json`, annotates them
-// with live 5h/7d usage from the usage endpoint, hides the ones listed in the
+// It gathers the launchable accounts from cswap's sequence.json, annotates them
+// with live 5h/7d usage (from the my-claude-usage menu bar app when it has a
+// fresh poll, else the usage endpoint), hides the ones listed in the
 // disabled state file, and draws a chicle list. It prints the chosen account's
 // email on stdout (empty output / non-zero exit means "don't launch"); the
 // shell wrapper does the actual cswap launch.
@@ -145,32 +146,111 @@ type usageRow struct {
 	Weekly *float64 `json:"weekly_usage"`
 }
 
-// fetchUsage returns live usage keyed by email. Any failure (endpoint down,
-// slow, malformed) yields an empty map so the menu degrades to bare emails
-// rather than hanging or erroring.
+// fetchUsage returns live usage keyed by email from the public usage
+// endpoint. Any failure (endpoint down, slow, malformed) yields an empty map so
+// the menu degrades to bare emails rather than hanging or erroring.
 func fetchUsage(url string) map[string]usageRow {
-	client := &http.Client{Timeout: 3 * time.Second}
-	resp, err := client.Get(url)
-	if err != nil {
-		return nil
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
+	body, ok := httpGet(url, 3*time.Second)
+	if !ok {
 		return nil
 	}
 	var rows []usageRow
 	if err := json.Unmarshal(body, &rows); err != nil {
 		return nil
 	}
+	return byEmail(rows)
+}
+
+func httpGet(url string, timeout time.Duration) ([]byte, bool) {
+	client := &http.Client{Timeout: timeout}
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, false
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	return body, err == nil
+}
+
+func byEmail(rows []usageRow) map[string]usageRow {
 	m := make(map[string]usageRow, len(rows))
 	for _, r := range rows {
 		m[r.Email] = r
 	}
 	return m
+}
+
+// The my-claude-usage menu bar app (~/c/my-claude-usage) already polls the
+// usage server every minute on each Mac, and shares its last good poll: on a
+// loopback port while it runs, and in a cache file for when it doesn't. Both
+// carry {"fetched_at": <unix seconds>, "accounts": <the endpoint's rows>}.
+const (
+	defaultLocalUsageURL = "http://127.0.0.1:5011/"
+	maxLocalUsageAge     = 15 * time.Minute
+)
+
+// usageSources is where usage comes from, in the order load tries them: the
+// running menu bar app, its cache file, then the public endpoint.
+type usageSources struct {
+	localURL  string // empty: skip
+	cachePath string // empty: skip
+	webURL    string
+}
+
+func defaultUsageSources() usageSources {
+	// An explicit endpoint is a request for that endpoint, not the local copies.
+	if u := os.Getenv("CLAUDE_USAGE_URL"); u != "" {
+		return usageSources{webURL: u}
+	}
+	home, _ := os.UserHomeDir()
+	return usageSources{
+		localURL:  defaultLocalUsageURL,
+		cachePath: filepath.Join(home, "Library", "Caches", "my-claude-usage", "usage.json"),
+		webURL:    defaultUsageURL,
+	}
+}
+
+// load returns the first fresh answer: the local copies only while their poll
+// is under maxLocalUsageAge old (the app may be running but offline, or long
+// quit), else whatever the endpoint says.
+func (s usageSources) load(now time.Time) map[string]usageRow {
+	if s.localURL != "" {
+		// Loopback: a running app answers in a millisecond, a missing one
+		// refuses at once; the timeout only covers a wedged app.
+		if body, ok := httpGet(s.localURL, 250*time.Millisecond); ok {
+			if m, ok := parseShare(body, now); ok {
+				return m
+			}
+		}
+	}
+	if s.cachePath != "" {
+		if body, err := os.ReadFile(s.cachePath); err == nil {
+			if m, ok := parseShare(body, now); ok {
+				return m
+			}
+		}
+	}
+	return fetchUsage(s.webURL)
+}
+
+// parseShare reads a local copy, reporting whether it is usable: well formed,
+// non-empty, and polled within maxLocalUsageAge of now.
+func parseShare(body []byte, now time.Time) (map[string]usageRow, bool) {
+	var share struct {
+		FetchedAt float64    `json:"fetched_at"`
+		Accounts  []usageRow `json:"accounts"`
+	}
+	if err := json.Unmarshal(body, &share); err != nil || share.FetchedAt <= 0 || len(share.Accounts) == 0 {
+		return nil, false
+	}
+	fetched := time.Unix(0, int64(share.FetchedAt*float64(time.Second)))
+	if age := now.Sub(fetched); age > maxLocalUsageAge || age < -time.Minute {
+		return nil, false
+	}
+	return byEmail(share.Accounts), true
 }
 
 func disabledPath() string {
@@ -328,15 +408,10 @@ func main() {
 		}
 	}
 
-	usageURL := os.Getenv("CLAUDE_USAGE_URL")
-	if usageURL == "" {
-		usageURL = defaultUsageURL
-	}
-
-	// The usage endpoint is a network round trip (~300ms); start it now so it
-	// overlaps reading the account list instead of following it.
+	// Usage may still take a network round trip (~300ms) when no fresh local
+	// copy exists; start it now so it overlaps reading the account list.
 	usageCh := make(chan map[string]usageRow, 1)
-	go func() { usageCh <- fetchUsage(usageURL) }()
+	go func() { usageCh <- defaultUsageSources().load(time.Now()) }()
 
 	liveEmails, err := liveAccountEmails()
 	if err != nil {
