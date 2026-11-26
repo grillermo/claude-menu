@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -57,7 +58,66 @@ func pct(v *float64) string {
 // liveAccountEmails returns the accounts cswap can launch, in cswap's own
 // order. An account missing here can't be launched, so this is the source of
 // truth for what the menu may offer.
+//
+// It reads cswap's sequence.json straight off disk: `cswap list --json` costs
+// a Python start (~170ms) and, for any account whose usage is stale, a network
+// fetch on top (500ms+), all to hand back the same email list. The subprocess
+// stays as the fallback for when the file is missing or its shape changed.
 func liveAccountEmails() ([]string, error) {
+	if emails, err := sequenceEmails(cswapSequencePath()); err == nil && len(emails) > 0 {
+		return emails, nil
+	}
+	return cswapListEmails()
+}
+
+// cswapSequencePath mirrors cswap's get_backup_root (paths.py): the legacy
+// ~/.claude-swap-backup on macOS, $XDG_DATA_HOME/claude-swap (default
+// ~/.local/share/claude-swap) on Linux.
+func cswapSequencePath() string {
+	home, _ := os.UserHomeDir()
+	root := filepath.Join(home, ".claude-swap-backup")
+	if runtime.GOOS == "linux" {
+		root = filepath.Join(home, ".local", "share", "claude-swap")
+		if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
+			if strings.HasPrefix(xdg, "~/") {
+				xdg = filepath.Join(home, xdg[2:])
+			}
+			if filepath.IsAbs(xdg) {
+				root = filepath.Join(xdg, "claude-swap")
+			}
+		}
+	}
+	return filepath.Join(root, "sequence.json")
+}
+
+// sequenceEmails lists the emails in sequence.json in its "sequence" order,
+// the order cswap's own list walks (switcher._build_accounts_info).
+func sequenceEmails(path string) ([]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var seq struct {
+		Sequence []json.Number `json:"sequence"`
+		Accounts map[string]struct {
+			Email string `json:"email"`
+		} `json:"accounts"`
+	}
+	if err := json.Unmarshal(data, &seq); err != nil {
+		return nil, err
+	}
+	emails := make([]string, 0, len(seq.Sequence))
+	for _, n := range seq.Sequence {
+		a, ok := seq.Accounts[n.String()]
+		if !ok || a.Email == "" {
+			return nil, fmt.Errorf("sequence.json: account %s has no email", n)
+		}
+		emails = append(emails, a.Email)
+	}
+	return emails, nil
+}
+
+func cswapListEmails() ([]string, error) {
 	out, err := exec.Command("cswap", "list", "--json").Output()
 	if err != nil {
 		return nil, fmt.Errorf("cswap list --json: %w", err)
@@ -273,6 +333,11 @@ func main() {
 		usageURL = defaultUsageURL
 	}
 
+	// The usage endpoint is a network round trip (~300ms); start it now so it
+	// overlaps reading the account list instead of following it.
+	usageCh := make(chan map[string]usageRow, 1)
+	go func() { usageCh <- fetchUsage(usageURL) }()
+
 	liveEmails, err := liveAccountEmails()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -283,7 +348,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	usage := fetchUsage(usageURL)
+	usage := <-usageCh
 	dpath := disabledPath()
 	disabled := readDisabled(dpath)
 	accts := buildAccounts(liveEmails, usage, disabled)

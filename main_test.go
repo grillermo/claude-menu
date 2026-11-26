@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -152,5 +153,29 @@ func TestBuildAccounts(t *testing.T) {
 	}
 	if accts[1].Five != nil {
 		t.Errorf("b has no usage, want nil Five")
+	}
+}
+
+func TestSequenceEmails(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sequence.json")
+	os.WriteFile(path, []byte(`{"activeAccountNumber": 4, "sequence": [3, 2, 4],
+		"accounts": {"2": {"email": "b@x"}, "3": {"email": "a@x"}, "4": {"email": "c@x"}}}`), 0o644)
+	got, err := sequenceEmails(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"a@x", "b@x", "c@x"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+
+	// A sequence entry with no account is a shape we don't understand: error,
+	// so the caller falls back to `cswap list --json`.
+	os.WriteFile(path, []byte(`{"sequence": [1], "accounts": {}}`), 0o644)
+	if _, err := sequenceEmails(path); err == nil {
+		t.Fatal("want an error for a dangling sequence entry")
+	}
+	if _, err := sequenceEmails(filepath.Join(dir, "missing.json")); err == nil {
+		t.Fatal("want an error for a missing file")
 	}
 }
